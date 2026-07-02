@@ -177,6 +177,46 @@ def test_plugin_run_once_resets_saved_flag_after_execution():
     assert plugin.get_config()["run_once"] is False
 
 
+def test_plugin_run_once_writes_plugin_logs_for_success():
+    module = load_plugin_module()
+
+    class CaptureLogger:
+        def __init__(self):
+            self.infos = []
+            self.warnings = []
+
+        def info(self, message, *args):
+            self.infos.append(message % args if args else message)
+
+        def warning(self, message, *args):
+            self.warnings.append(message % args if args else message)
+
+    class Downloader:
+        def list_torrents(self):
+            return [{"hash": "abc", "save_path": "/downloads/A"}]
+
+        def list_files(self, task_ref):
+            return [{"name": "A.mkv"}]
+
+        def delete_task(self, task_ref, delete_source_data):
+            return True
+
+    capture = CaptureLogger()
+    module.logger = capture
+    plugin = module.SyncRemover()
+    plugin._downloaders = {"QB": Downloader()}
+    plugin.init_plugin(
+        {
+            "run_once": True,
+            "manual_target_path": "/downloads/A/A.mkv",
+            "download_dirs": ["/downloads"],
+        }
+    )
+
+    assert any("立即执行开始" in message for message in capture.infos)
+    assert any("立即执行完成" in message and "success" in message for message in capture.infos)
+
+
 def test_plugin_run_once_without_target_is_failed_record():
     module = load_plugin_module()
     plugin = module.SyncRemover()
@@ -185,6 +225,28 @@ def test_plugin_run_once_without_target_is_failed_record():
 
     assert result["ok"] is False
     assert result["reason"] == "manual_target_path is required"
+
+
+def test_plugin_run_once_without_target_writes_warning_log():
+    module = load_plugin_module()
+
+    class CaptureLogger:
+        def __init__(self):
+            self.warnings = []
+
+        def info(self, message, *args):
+            pass
+
+        def warning(self, message, *args):
+            self.warnings.append(message % args if args else message)
+
+    capture = CaptureLogger()
+    module.logger = capture
+    plugin = module.SyncRemover()
+
+    plugin.api_run_once()
+
+    assert any("未填写手动执行目标路径" in message for message in capture.warnings)
 
 
 def test_plugin_scan_paths_api_returns_options(tmp_path):
@@ -281,5 +343,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.3"
+    assert package["SyncRemover"]["version"] == "0.1.4"
     assert package["SyncRemover"]["level"] == 1

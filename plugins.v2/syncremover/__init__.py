@@ -54,6 +54,13 @@ except Exception:
     EventType = _FallbackEventType
     _PluginBase = _FallbackPluginBase
 
+try:
+    from app.log import logger
+except Exception:
+    import logging
+
+    logger = logging.getLogger("syncremover")
+
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -499,7 +506,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.3"
+    plugin_version = "0.1.4"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
@@ -796,7 +803,9 @@ class SyncRemover(_PluginBase):
             task_ref=task_ref,
             reason=str(record.get("match_reason") or "retry"),
         )
-        return DeleteExecutor(self._config, self._audit_store).execute(context, match)
+        result = DeleteExecutor(self._config, self._audit_store).execute(context, match)
+        self._log_result("重试", result)
+        return result
 
     def api_dry_run(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         event = type("DryRunEvent", (), {"event_type": "dry_run", "event_data": payload or {}})()
@@ -804,13 +813,17 @@ class SyncRemover(_PluginBase):
         match = TaskMatcher(self._downloaders).match(context)
         config = dict(self._config)
         config["dry_run"] = True
-        return DeleteExecutor(config, self._audit_store).execute(context, match)
+        result = DeleteExecutor(config, self._audit_store).execute(context, match)
+        self._log_result("演练", result)
+        return result
 
     def api_run_once(self) -> Dict[str, Any]:
         target_path = str(self._config.get("manual_target_path") or "").strip()
         if not target_path:
+            logger.warning("同步删除助手：立即执行失败，未填写手动执行目标路径")
             return {"ok": False, "reason": "manual_target_path is required"}
 
+        logger.info("同步删除助手：立即执行开始，目标路径：%s", target_path)
         event_data = {
             "path": target_path,
             "download_path": target_path,
@@ -819,7 +832,9 @@ class SyncRemover(_PluginBase):
         event = type("ManualRunEvent", (), {"event_type": "manual.run", "event_data": event_data})()
         context = self._parser.parse(event)
         match = TaskMatcher(self._downloaders).match(context)
-        return DeleteExecutor(self._config, self._audit_store).execute(context, match)
+        result = DeleteExecutor(self._config, self._audit_store).execute(context, match)
+        self._log_result("立即执行", result, target_path=target_path)
+        return result
 
     def api_scan_paths(self) -> Dict[str, Any]:
         return {"paths": self._path_options()}
@@ -835,7 +850,9 @@ class SyncRemover(_PluginBase):
         matcher = TaskMatcher(self._downloaders)
         match = matcher.match(context)
         executor = DeleteExecutor(self._config, self._audit_store)
-        return executor.execute(context, match)
+        result = executor.execute(context, match)
+        self._log_result("事件删除", result)
+        return result
 
     @eventmanager.register([EventType.HistoryDeleted, EventType.DownloadFileDeleted, EventType.DownloadDeleted])
     def on_delete_event(self, event: Any) -> Optional[Dict[str, Any]]:
@@ -857,6 +874,21 @@ class SyncRemover(_PluginBase):
             self.update_config(self._config)
         except Exception:
             pass
+
+    def _log_result(self, action: str, result: Dict[str, Any], target_path: Optional[str] = None):
+        status = str(result.get("status") or "unknown")
+        reason = str(result.get("reason") or "-")
+        downloader = str(result.get("downloader") or "-")
+        task_ref = str(result.get("task_ref") or "-")
+        path = str(target_path or result.get("download_path") or "-")
+        message = (
+            "同步删除助手：%s完成，状态：%s，原因：%s，下载器：%s，任务：%s，路径：%s"
+            % (action, status, reason, downloader, task_ref, path)
+        )
+        if status in {"success", "dry_run"}:
+            logger.info(message)
+        else:
+            logger.warning(message)
 
     def _coerce_paths(self, value: Any) -> List[str]:
         if not value:
