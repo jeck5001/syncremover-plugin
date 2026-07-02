@@ -32,6 +32,8 @@ def test_plugin_defaults_are_safe():
     assert defaults["strict_path_guard"] is True
     assert defaults["continue_hardlink_on_downloader_failure"] is False
     assert defaults["dry_run"] is False
+    assert "/media" in defaults["path_scan_roots"]
+    assert "/downloads" in defaults["path_scan_roots"]
 
 
 def test_plugin_exposes_audit_retry_dry_run_and_clear_api():
@@ -41,7 +43,7 @@ def test_plugin_exposes_audit_retry_dry_run_and_clear_api():
     apis = plugin.get_api()
     paths = {api["path"] for api in apis}
 
-    assert paths == {"/audit", "/retry", "/dry-run", "/clear-audit"}
+    assert paths == {"/audit", "/retry", "/dry-run", "/clear-audit", "/scan-paths"}
 
 
 def test_plugin_form_contains_safety_controls():
@@ -55,7 +57,42 @@ def test_plugin_form_contains_safety_controls():
     assert "硬链接清理范围" in rendered
     assert "媒体目录白名单" in rendered
     assert "下载目录白名单" in rendered
+    assert "VCombobox" in rendered
+    assert "可选择或手填" in rendered
     assert defaults["delete_source_data"] is True
+
+
+def test_plugin_form_contains_scanned_path_options(tmp_path):
+    module = load_plugin_module()
+    plugin = module.SyncRemover()
+    media_root = tmp_path / "media"
+    download_root = tmp_path / "downloads"
+    media_root.mkdir()
+    download_root.mkdir()
+    plugin.init_plugin({"path_scan_roots": [str(media_root), str(download_root)], "path_scan_depth": 0})
+
+    form, _ = plugin.get_form()
+    rendered = str(form)
+
+    assert str(media_root) in rendered
+    assert str(download_root) in rendered
+
+
+def test_plugin_scan_paths_api_returns_options(tmp_path):
+    module = load_plugin_module()
+    plugin = module.SyncRemover()
+    media_root = tmp_path / "media"
+    download_root = tmp_path / "downloads"
+    media_root.mkdir()
+    download_root.mkdir()
+    plugin.init_plugin({"path_scan_roots": [str(media_root), str(download_root)], "path_scan_depth": 0})
+
+    response = plugin.api_scan_paths()
+
+    assert response["paths"] == [str(download_root), str(media_root)] or response["paths"] == [
+        str(media_root),
+        str(download_root),
+    ]
 
 
 def test_plugin_audit_api_lists_records():
@@ -135,5 +172,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.0"
+    assert package["SyncRemover"]["version"] == "0.1.1"
     assert package["SyncRemover"]["level"] == 1
