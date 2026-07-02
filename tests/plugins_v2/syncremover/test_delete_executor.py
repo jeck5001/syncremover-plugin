@@ -1,0 +1,126 @@
+from test_plugin_contract import load_plugin_module
+
+
+class FakeDownloader:
+    def __init__(self, should_delete=True):
+        self.should_delete = should_delete
+        self.calls = []
+
+    def delete_task(self, task_ref, delete_source_data):
+        self.calls.append((task_ref, delete_source_data))
+        return self.should_delete
+
+
+def test_executor_dry_run_does_not_delete_task(tmp_path):
+    module = load_plugin_module()
+    downloader = FakeDownloader()
+    match = module.MatchResult("matched", "qbittorrent", downloader, "abc", {"hash": "abc"}, "hash")
+    audit = module.AuditStore(limit=10)
+    executor = module.DeleteExecutor(
+        config={**module.DEFAULT_CONFIG, "dry_run": True, "download_dirs": [str(tmp_path)]},
+        audit_store=audit,
+    )
+
+    result = executor.execute(module.DeleteContext("history.deleted", confidence="direct_task"), match)
+
+    assert result["status"] == "dry_run"
+    assert downloader.calls == []
+    assert audit.list_records()[0]["status"] == "dry_run"
+
+
+def test_executor_passes_delete_source_data_to_downloader(tmp_path):
+    module = load_plugin_module()
+    downloader = FakeDownloader()
+    match = module.MatchResult("matched", "qbittorrent", downloader, "abc", {"hash": "abc"}, "hash")
+    audit = module.AuditStore(limit=10)
+    executor = module.DeleteExecutor(
+        config={**module.DEFAULT_CONFIG, "download_dirs": [str(tmp_path)]},
+        audit_store=audit,
+    )
+
+    result = executor.execute(module.DeleteContext("history.deleted", confidence="direct_task"), match)
+
+    assert result["status"] == "success"
+    assert downloader.calls == [("abc", True)]
+
+
+def test_executor_rejects_missing_path_guard(tmp_path):
+    module = load_plugin_module()
+    downloader = FakeDownloader()
+    match = module.MatchResult("matched", "qbittorrent", downloader, "abc", {"hash": "abc"}, "hash")
+    audit = module.AuditStore(limit=10)
+    executor = module.DeleteExecutor(
+        config={**module.DEFAULT_CONFIG, "media_dirs": [], "download_dirs": [], "strict_path_guard": True},
+        audit_store=audit,
+    )
+
+    result = executor.execute(
+        module.DeleteContext("history.deleted", download_path=str(tmp_path / "A.mkv"), confidence="direct_task"),
+        match,
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "path guard rejected delete"
+    assert downloader.calls == []
+
+
+def test_executor_deletes_current_hardlink_after_downloader_success(tmp_path):
+    module = load_plugin_module()
+    download = tmp_path / "downloads" / "A.mkv"
+    media = tmp_path / "media" / "A.mkv"
+    download.parent.mkdir()
+    media.parent.mkdir()
+    download.write_text("video", encoding="utf-8")
+    media.hardlink_to(download)
+    downloader = FakeDownloader()
+    match = module.MatchResult("matched", "qbittorrent", downloader, "abc", {"hash": "abc"}, "hash")
+    audit = module.AuditStore(limit=10)
+    executor = module.DeleteExecutor(
+        config={
+            **module.DEFAULT_CONFIG,
+            "media_dirs": [str(media.parent)],
+            "download_dirs": [str(download.parent)],
+            "hardlink_scope": "current_file",
+        },
+        audit_store=audit,
+    )
+
+    result = executor.execute(
+        module.DeleteContext(
+            "history.deleted",
+            media_paths=[str(media)],
+            download_path=str(download),
+            confidence="direct_task",
+        ),
+        match,
+    )
+
+    assert result["status"] == "success"
+    assert media.exists() is False
+
+
+def test_executor_stops_when_downloader_delete_fails(tmp_path):
+    module = load_plugin_module()
+    media = tmp_path / "media" / "A.mkv"
+    media.parent.mkdir()
+    media.write_text("video", encoding="utf-8")
+    downloader = FakeDownloader(should_delete=False)
+    match = module.MatchResult("matched", "qbittorrent", downloader, "abc", {"hash": "abc"}, "hash")
+    audit = module.AuditStore(limit=10)
+    executor = module.DeleteExecutor(
+        config={
+            **module.DEFAULT_CONFIG,
+            "media_dirs": [str(media.parent)],
+            "download_dirs": [str(tmp_path / "downloads")],
+            "continue_hardlink_on_downloader_failure": False,
+        },
+        audit_store=audit,
+    )
+
+    result = executor.execute(
+        module.DeleteContext("history.deleted", media_paths=[str(media)], confidence="direct_task"),
+        match,
+    )
+
+    assert result["status"] == "failed"
+    assert media.exists()
