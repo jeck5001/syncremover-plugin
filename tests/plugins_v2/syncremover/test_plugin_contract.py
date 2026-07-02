@@ -197,6 +197,73 @@ def test_plugin_run_once_matches_manual_media_hardlink_path(tmp_path):
     assert not media_file.exists()
 
 
+def test_plugin_run_once_allows_manual_path_under_scan_root(tmp_path):
+    module = load_plugin_module()
+    media_dir = tmp_path / "media" / "cartoon"
+    media_dir.mkdir(parents=True)
+    media_file = media_dir / "A.mkv"
+    media_file.write_text("movie", encoding="utf-8")
+
+    class Downloader:
+        def __init__(self):
+            self.deleted = []
+
+        def list_torrents(self):
+            return [{"hash": "abc", "save_path": str(media_dir)}]
+
+        def list_files(self, task_ref):
+            return [{"name": "A.mkv"}]
+
+        def delete_task(self, task_ref, delete_source_data):
+            self.deleted.append((task_ref, delete_source_data))
+            return True
+
+    downloader = Downloader()
+    plugin = module.SyncRemover()
+    plugin._downloaders = {"tr": downloader}
+    plugin.init_plugin(
+        {
+            "run_once": True,
+            "manual_target_path": str(media_file),
+            "media_dirs": [],
+            "download_dirs": [],
+            "path_scan_roots": [str(tmp_path / "media")],
+            "path_scan_roots_manual": "",
+        }
+    )
+    result = plugin._audit_store.list_records()[0]
+
+    assert result["status"] == "success"
+    assert downloader.deleted == [("abc", True)]
+
+
+def test_plugin_path_guard_failure_reports_allowed_roots():
+    module = load_plugin_module()
+    plugin = module.SyncRemover()
+    plugin.init_plugin(
+        {
+            "media_dirs": ["/allowed/media"],
+            "download_dirs": ["/allowed/download"],
+            "path_scan_roots": [],
+            "path_scan_roots_manual": "",
+        }
+    )
+    context = module.DeleteContext(
+        event_type="manual.run",
+        media_paths=["/blocked/media/A.mkv"],
+        download_path="/blocked/media/A.mkv",
+        confidence="path",
+        source="manual",
+    )
+    match = module.MatchResult(status="matched", downloader_name="tr", downloader=object(), task_ref="abc")
+
+    result = module.DeleteExecutor(plugin._config, plugin._audit_store).execute(context, match)
+
+    assert result["status"] == "failed"
+    assert "/allowed/media" in result["reason"]
+    assert "/allowed/download" in result["reason"]
+
+
 def test_plugin_run_once_resets_saved_flag_after_execution():
     module = load_plugin_module()
 
@@ -389,5 +456,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.5"
+    assert package["SyncRemover"]["version"] == "0.1.6"
     assert package["SyncRemover"]["level"] == 1

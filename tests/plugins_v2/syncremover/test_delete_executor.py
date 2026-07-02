@@ -60,7 +60,7 @@ def test_executor_rejects_missing_path_guard(tmp_path):
     )
 
     assert result["status"] == "failed"
-    assert result["reason"] == "path guard rejected delete"
+    assert result["reason"].startswith("path guard rejected delete")
     assert downloader.calls == []
 
 

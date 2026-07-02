@@ -17,6 +17,7 @@ https://raw.githubusercontent.com/jeck5001/syncremover-plugin/main/package.v2.js
 - 支持按下载源路径或媒体硬链接路径手动执行一次。
 - 支持演练模式，先看匹配和删除计划，不实际删除。
 - 支持媒体目录、下载目录白名单，避免误删白名单外路径。
+- 手动执行会把路径扫描根目录作为兜底安全根，避免已匹配任务后仍因未选择白名单被拦截。
 - 支持从 `/vol2/1000/media`、`/media`、`/downloads`、`/mnt`、`/data`、`/volume1` 扫描候选目录。
 
 ## 推荐配置
@@ -77,6 +78,7 @@ https://raw.githubusercontent.com/jeck5001/syncremover-plugin/main/package.v2.js
 - `failed`：被白名单、路径守卫或下载器删除结果拦截。
 
 如果填的是媒体硬链接路径，匹配成功时原因会显示 `hardlink_path`。
+如果被路径守卫拦截，日志原因会显示当前允许根目录 `allowed roots=...`，把目标路径所在目录加入扫描根目录、媒体目录白名单或下载目录白名单即可。
 
 ## 安全边界
 

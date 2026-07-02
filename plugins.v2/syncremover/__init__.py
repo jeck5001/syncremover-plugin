@@ -438,8 +438,9 @@ class DeleteExecutor:
         if match.status != "matched":
             return self._record("skipped", context, match, match.reason)
 
-        if not self._path_guard_allows(context):
-            return self._record("failed", context, match, "path guard rejected delete")
+        path_guard_reason = self._path_guard_rejection_reason(context)
+        if path_guard_reason:
+            return self._record("failed", context, match, path_guard_reason)
 
         if self.config.get("dry_run"):
             return self._record("dry_run", context, match, "dry run enabled")
@@ -454,23 +455,35 @@ class DeleteExecutor:
         return result
 
     def _path_guard_allows(self, context: DeleteContext) -> bool:
-        if not self.config.get("strict_path_guard", True):
-            return True
+        return self._path_guard_rejection_reason(context) is None
 
-        media_dirs = [Path(path).resolve() for path in self.config.get("media_dirs", [])]
-        download_dirs = [Path(path).resolve() for path in self.config.get("download_dirs", [])]
+    def _path_guard_rejection_reason(self, context: DeleteContext) -> Optional[str]:
+        if not self.config.get("strict_path_guard", True):
+            return None
+
+        allowed_roots = self._allowed_roots(context)
         checked_paths = [Path(path) for path in context.media_paths]
         if context.download_path:
             checked_paths.append(Path(context.download_path))
 
         if not checked_paths:
-            return bool(media_dirs or download_dirs)
-
-        allowed_roots = media_dirs + download_dirs
+            if allowed_roots:
+                return None
+            return "path guard rejected delete: no checked path and no allowed roots"
         if not allowed_roots:
-            return False
+            return "path guard rejected delete: no media/download whitelist or manual scan roots configured"
 
-        return all(self._is_under(path, allowed_roots) for path in checked_paths)
+        if all(self._is_under(path, allowed_roots) for path in checked_paths):
+            return None
+
+        return "path guard rejected delete: allowed roots=%s" % ", ".join(str(root) for root in allowed_roots)
+
+    def _allowed_roots(self, context: DeleteContext) -> List[Path]:
+        roots = [Path(path).resolve() for path in self.config.get("media_dirs", [])]
+        roots.extend(Path(path).resolve() for path in self.config.get("download_dirs", []))
+        if context.source == "manual":
+            roots.extend(Path(path).resolve() for path in self.config.get("path_scan_roots", []))
+        return list(dict.fromkeys(roots))
 
     def _delete_hardlinks(self, context: DeleteContext) -> List[str]:
         if not context.download_path or not context.media_paths:
@@ -522,7 +535,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.5"
+    plugin_version = "0.1.6"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
@@ -847,6 +860,7 @@ class SyncRemover(_PluginBase):
         }
         event = type("ManualRunEvent", (), {"event_type": "manual.run", "event_data": event_data})()
         context = self._parser.parse(event)
+        context.source = "manual"
         match = TaskMatcher(self._downloaders).match(context)
         result = DeleteExecutor(self._config, self._audit_store).execute(context, match)
         self._log_result("立即执行", result, target_path=target_path)
