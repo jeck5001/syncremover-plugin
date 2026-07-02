@@ -62,6 +62,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled_downloaders": ["qbittorrent", "transmission"],
     "media_dirs": [],
     "download_dirs": [],
+    "path_scan_roots": ["/media", "/downloads", "/mnt", "/data", "/volume1"],
+    "path_scan_depth": 2,
     "strict_path_guard": True,
     "continue_hardlink_on_downloader_failure": False,
     "dry_run": False,
@@ -288,6 +290,43 @@ def _create_downloader_helper() -> Any:
     return DownloaderHelper()
 
 
+class PathScanner:
+    def __init__(self, common_roots: List[str], max_depth: int = 2):
+        self.common_roots = [Path(path) for path in common_roots if path]
+        self.max_depth = max(0, int(max_depth))
+
+    def scan(self) -> List[str]:
+        paths: List[str] = []
+        for root in self.common_roots:
+            paths.extend(self._scan_root(root))
+        return sorted(dict.fromkeys(paths))
+
+    def _scan_root(self, root: Path) -> List[str]:
+        try:
+            if not root.exists() or not root.is_dir():
+                return []
+        except OSError:
+            return []
+
+        found = [str(root)]
+        if self.max_depth == 0:
+            return found
+
+        stack: List[Tuple[Path, int]] = [(root, 0)]
+        while stack:
+            current, depth = stack.pop()
+            if depth >= self.max_depth:
+                continue
+            try:
+                children = sorted(child for child in current.iterdir() if child.is_dir())
+            except OSError:
+                continue
+            for child in children:
+                found.append(str(child))
+                stack.append((child, depth + 1))
+        return found
+
+
 class HardlinkResolver:
     def __init__(self, media_dirs: List[str], download_dirs: List[str]):
         self.media_dirs = [Path(path).resolve() for path in media_dirs]
@@ -455,7 +494,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
@@ -489,10 +528,12 @@ class SyncRemover(_PluginBase):
             {"path": "/audit", "endpoint": self.api_audit, "methods": ["GET"], "summary": "同步删除审计记录"},
             {"path": "/retry", "endpoint": self.api_retry, "methods": ["POST"], "summary": "重试审计记录"},
             {"path": "/dry-run", "endpoint": self.api_dry_run, "methods": ["POST"], "summary": "预演删除计划"},
+            {"path": "/scan-paths", "endpoint": self.api_scan_paths, "methods": ["GET"], "summary": "扫描可选路径"},
             {"path": "/clear-audit", "endpoint": self.api_clear_audit, "methods": ["POST"], "summary": "清空审计记录"},
         ]
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        path_options = self._path_options()
         return [
             {
                 "component": "VForm",
@@ -511,8 +552,39 @@ class SyncRemover(_PluginBase):
                             ],
                         },
                     },
-                    {"component": "VTextarea", "props": {"model": "media_dirs", "label": "媒体目录白名单"}},
-                    {"component": "VTextarea", "props": {"model": "download_dirs", "label": "下载目录白名单"}},
+                    {
+                        "component": "VCombobox",
+                        "props": {
+                            "model": "media_dirs",
+                            "label": "媒体目录白名单（可选择或手填）",
+                            "items": path_options,
+                            "multiple": True,
+                            "chips": True,
+                            "clearable": True,
+                        },
+                    },
+                    {
+                        "component": "VCombobox",
+                        "props": {
+                            "model": "download_dirs",
+                            "label": "下载目录白名单（可选择或手填）",
+                            "items": path_options,
+                            "multiple": True,
+                            "chips": True,
+                            "clearable": True,
+                        },
+                    },
+                    {
+                        "component": "VCombobox",
+                        "props": {
+                            "model": "path_scan_roots",
+                            "label": "路径扫描根目录（可选择或手填）",
+                            "items": path_options,
+                            "multiple": True,
+                            "chips": True,
+                            "clearable": True,
+                        },
+                    },
                     {
                         "component": "VSwitch",
                         "props": {
@@ -577,6 +649,9 @@ class SyncRemover(_PluginBase):
         config["dry_run"] = True
         return DeleteExecutor(config, self._audit_store).execute(context, match)
 
+    def api_scan_paths(self) -> Dict[str, Any]:
+        return {"paths": self._path_options()}
+
     def api_clear_audit(self) -> Dict[str, Any]:
         self._audit_store.clear()
         return {"ok": True}
@@ -593,6 +668,12 @@ class SyncRemover(_PluginBase):
     @eventmanager.register([EventType.HistoryDeleted, EventType.DownloadFileDeleted, EventType.DownloadDeleted])
     def on_delete_event(self, event: Any) -> Optional[Dict[str, Any]]:
         return self.handle_delete_event(event)
+
+    def _path_options(self) -> List[str]:
+        roots = list(self._config.get("path_scan_roots") or [])
+        roots.extend(self._config.get("media_dirs") or [])
+        roots.extend(self._config.get("download_dirs") or [])
+        return PathScanner(roots, max_depth=int(self._config.get("path_scan_depth", 2))).scan()
 
     def stop_service(self):
         self._enabled = False
