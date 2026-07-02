@@ -464,7 +464,7 @@ class DeleteExecutor:
 
         allowed_roots = self._allowed_roots(context)
         checked_paths = [Path(path) for path in context.media_paths]
-        if context.download_path:
+        if context.download_path and not (context.source == "manual" and context.media_paths):
             checked_paths.append(Path(context.download_path))
 
         if not checked_paths:
@@ -542,7 +542,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.7"
+    plugin_version = "0.1.8"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
@@ -856,8 +856,7 @@ class SyncRemover(_PluginBase):
     def api_run_once(self) -> Dict[str, Any]:
         target_path = str(self._config.get("manual_target_path") or "").strip()
         if not target_path:
-            logger.warning("同步删除助手：立即执行失败，未填写手动执行目标路径")
-            return {"ok": False, "reason": "manual_target_path is required"}
+            return self._api_run_whitelist_once()
 
         logger.info("同步删除助手：立即执行开始，目标路径：%s", target_path)
         event_data = {
@@ -872,6 +871,120 @@ class SyncRemover(_PluginBase):
         result = DeleteExecutor(self._config, self._audit_store).execute(context, match)
         self._log_result("立即执行", result, target_path=target_path)
         return result
+
+    def _api_run_whitelist_once(self) -> Dict[str, Any]:
+        media_roots = self._coerce_paths(self._config.get("media_dirs"))
+        download_roots = self._coerce_paths(self._config.get("download_dirs"))
+        if not media_roots and not download_roots:
+            logger.warning("同步删除助手：立即执行失败，未填写手动执行目标路径，且没有配置白名单")
+            return {"ok": False, "reason": "manual_target_path or whitelist is required"}
+
+        logger.info(
+            "同步删除助手：白名单批量执行开始，媒体白名单：%s，下载白名单：%s",
+            ",".join(media_roots) or "-",
+            ",".join(download_roots) or "-",
+        )
+        results: List[Dict[str, Any]] = []
+        handled_tasks = set()
+        for downloader_name, downloader in self._downloaders.items():
+            for task in downloader.list_torrents():
+                task_ref = task.get("hash") or task.get("hashString") or task.get("id")
+                if task_ref is None or (downloader_name, task_ref) in handled_tasks:
+                    continue
+                result = self._execute_whitelisted_task(
+                    downloader_name=downloader_name,
+                    downloader=downloader,
+                    task_ref=task_ref,
+                    task=task,
+                    media_roots=media_roots,
+                    download_roots=download_roots,
+                )
+                if result:
+                    handled_tasks.add((downloader_name, task_ref))
+                    results.append(result)
+
+        if not results:
+            logger.warning("同步删除助手：白名单批量执行完成，未找到白名单内下载器任务")
+            return {"ok": False, "reason": "no whitelisted downloader task found", "total": 0}
+
+        logger.info("同步删除助手：白名单批量执行完成，共处理：%s", len(results))
+        return {"ok": True, "total": len(results), "results": results}
+
+    def _execute_whitelisted_task(
+        self,
+        downloader_name: str,
+        downloader: Any,
+        task_ref: Any,
+        task: Dict[str, Any],
+        media_roots: List[str],
+        download_roots: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        save_path = task.get("save_path") or task.get("downloadDir") or task.get("download_dir") or ""
+        for file_info in downloader.list_files(task_ref):
+            file_name = file_info.get("name") or file_info.get("path") or ""
+            full_path = str(Path(save_path) / file_name)
+            media_path = self._find_hardlinked_media_path(Path(full_path), media_roots)
+            if not media_path and not self._path_is_under_any(full_path, download_roots + media_roots):
+                continue
+
+            context = DeleteContext(
+                event_type="manual.batch",
+                media_paths=[media_path] if media_path else [],
+                download_path=full_path,
+                source="manual",
+                confidence="direct_task",
+            )
+            match = MatchResult(
+                status="matched",
+                downloader_name=downloader_name,
+                downloader=downloader,
+                task_ref=task_ref,
+                task=task,
+                reason="hardlink_path" if media_path else "whitelist_path",
+            )
+            result = DeleteExecutor(self._config, self._audit_store).execute(context, match)
+            self._log_result("白名单批量", result, target_path=media_path or full_path)
+            return result
+        return None
+
+    def _find_hardlinked_media_path(self, source_path: Path, media_roots: List[str]) -> Optional[str]:
+        try:
+            source_stat = source_path.stat()
+        except OSError:
+            return None
+        for root in media_roots:
+            root_path = Path(root)
+            try:
+                candidates = root_path.rglob("*")
+            except OSError:
+                continue
+            for candidate in candidates:
+                if not candidate.is_file():
+                    continue
+                try:
+                    if candidate.resolve() == source_path.resolve():
+                        continue
+                    candidate_stat = candidate.stat()
+                except OSError:
+                    continue
+                if (
+                    source_stat.st_dev == candidate_stat.st_dev
+                    and source_stat.st_ino == candidate_stat.st_ino
+                    and source_stat.st_nlink > 1
+                    and candidate_stat.st_nlink > 1
+                ):
+                    return str(candidate)
+        return None
+
+    def _path_is_under_any(self, path: str, roots: List[str]) -> bool:
+        resolved = Path(path).resolve()
+        for root in roots:
+            try:
+                resolved.relative_to(Path(root).resolve())
+                return True
+            except ValueError:
+                continue
+        return False
 
     def api_scan_paths(self) -> Dict[str, Any]:
         return {"paths": self._path_options()}

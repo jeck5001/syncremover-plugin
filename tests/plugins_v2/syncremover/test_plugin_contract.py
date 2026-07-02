@@ -338,10 +338,10 @@ def test_plugin_run_once_without_target_is_failed_record():
     result = plugin.api_run_once()
 
     assert result["ok"] is False
-    assert result["reason"] == "manual_target_path is required"
+    assert result["reason"] == "manual_target_path or whitelist is required"
 
 
-def test_plugin_run_once_without_target_writes_warning_log():
+def test_plugin_run_once_without_target_and_whitelist_writes_warning_log():
     module = load_plugin_module()
 
     class CaptureLogger:
@@ -360,7 +360,95 @@ def test_plugin_run_once_without_target_writes_warning_log():
 
     plugin.api_run_once()
 
-    assert any("未填写手动执行目标路径" in message for message in capture.warnings)
+    assert any("未填写手动执行目标路径，且没有配置白名单" in message for message in capture.warnings)
+
+
+def test_plugin_run_once_without_target_executes_download_whitelist(tmp_path):
+    module = load_plugin_module()
+    allowed_dir = tmp_path / "downloads" / "allowed"
+    blocked_dir = tmp_path / "downloads" / "blocked"
+    allowed_dir.mkdir(parents=True)
+    blocked_dir.mkdir(parents=True)
+    allowed_file = allowed_dir / "A.mkv"
+    blocked_file = blocked_dir / "B.mkv"
+    allowed_file.write_text("a", encoding="utf-8")
+    blocked_file.write_text("b", encoding="utf-8")
+
+    class Downloader:
+        def __init__(self):
+            self.deleted = []
+
+        def list_torrents(self):
+            return [
+                {"hash": "allowed", "save_path": str(allowed_dir)},
+                {"hash": "blocked", "save_path": str(blocked_dir)},
+            ]
+
+        def list_files(self, task_ref):
+            return [{"name": "A.mkv" if task_ref == "allowed" else "B.mkv"}]
+
+        def delete_task(self, task_ref, delete_source_data):
+            self.deleted.append((task_ref, delete_source_data))
+            return True
+
+    downloader = Downloader()
+    plugin = module.SyncRemover()
+    plugin._downloaders = {"tr": downloader}
+    plugin.init_plugin(
+        {
+            "run_once": True,
+            "manual_target_path": "",
+            "download_dirs": [str(allowed_dir)],
+            "media_dirs": [],
+            "path_scan_roots_manual": "",
+        }
+    )
+
+    assert downloader.deleted == [("allowed", True)]
+    assert plugin._audit_store.list_records()[0]["status"] == "success"
+
+
+def test_plugin_run_once_without_target_executes_media_hardlink_whitelist(tmp_path):
+    module = load_plugin_module()
+    download_dir = tmp_path / "downloads" / "A"
+    media_dir = tmp_path / "media" / "cartoon"
+    download_dir.mkdir(parents=True)
+    media_dir.mkdir(parents=True)
+    source_file = download_dir / "A.mkv"
+    media_file = media_dir / "A.mkv"
+    source_file.write_text("movie", encoding="utf-8")
+    os.link(source_file, media_file)
+
+    class Downloader:
+        def __init__(self):
+            self.deleted = []
+
+        def list_torrents(self):
+            return [{"hash": "abc", "save_path": str(download_dir)}]
+
+        def list_files(self, task_ref):
+            return [{"name": "A.mkv"}]
+
+        def delete_task(self, task_ref, delete_source_data):
+            self.deleted.append((task_ref, delete_source_data))
+            return True
+
+    downloader = Downloader()
+    plugin = module.SyncRemover()
+    plugin._downloaders = {"tr": downloader}
+    plugin.init_plugin(
+        {
+            "run_once": True,
+            "manual_target_path": "",
+            "download_dirs": [],
+            "media_dirs": [str(media_dir)],
+            "path_scan_roots_manual": "",
+        }
+    )
+
+    assert downloader.deleted == [("abc", True)]
+    assert plugin._audit_store.list_records()[0]["status"] == "success"
+    assert not media_file.exists()
 
 
 def test_plugin_scan_paths_api_returns_options(tmp_path):
@@ -457,5 +545,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.7"
+    assert package["SyncRemover"]["version"] == "0.1.8"
     assert package["SyncRemover"]["level"] == 1
