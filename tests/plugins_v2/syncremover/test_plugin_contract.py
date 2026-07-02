@@ -34,6 +34,9 @@ def test_plugin_defaults_are_safe():
     assert defaults["dry_run"] is False
     assert "/media" in defaults["path_scan_roots"]
     assert "/downloads" in defaults["path_scan_roots"]
+    assert "/vol2/1000/media" in defaults["path_scan_roots"]
+    assert defaults["media_dirs_manual"] == ""
+    assert defaults["download_dirs_manual"] == ""
 
 
 def test_plugin_exposes_audit_retry_dry_run_and_clear_api():
@@ -57,8 +60,11 @@ def test_plugin_form_contains_safety_controls():
     assert "硬链接清理范围" in rendered
     assert "媒体目录白名单" in rendered
     assert "下载目录白名单" in rendered
-    assert "VCombobox" in rendered
-    assert "可选择或手填" in rendered
+    assert "VSelect" in rendered
+    assert "VTextarea" in rendered
+    assert "VCombobox" not in rendered
+    assert "chips" not in rendered
+    assert "每行一个" in rendered
     assert defaults["delete_source_data"] is True
 
 
@@ -76,6 +82,22 @@ def test_plugin_form_contains_scanned_path_options(tmp_path):
 
     assert str(media_root) in rendered
     assert str(download_root) in rendered
+
+
+def test_plugin_merges_selected_and_manual_paths():
+    module = load_plugin_module()
+    plugin = module.SyncRemover()
+    plugin.init_plugin(
+        {
+            "media_dirs": ["/selected/media"],
+            "media_dirs_manual": "/manual/media\n/selected/media\n",
+            "download_dirs": ["/selected/download"],
+            "download_dirs_manual": "/manual/download\n",
+        }
+    )
+
+    assert plugin._config["media_dirs"] == ["/selected/media", "/manual/media"]
+    assert plugin._config["download_dirs"] == ["/selected/download", "/manual/download"]
 
 
 def test_plugin_scan_paths_api_returns_options(tmp_path):
@@ -172,5 +194,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.1"
+    assert package["SyncRemover"]["version"] == "0.1.2"
     assert package["SyncRemover"]["level"] == 1
