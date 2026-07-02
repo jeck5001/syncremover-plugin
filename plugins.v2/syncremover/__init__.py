@@ -445,11 +445,12 @@ class DeleteExecutor:
         if self.config.get("dry_run"):
             return self._record("dry_run", context, match, "dry run enabled")
 
+        hardlink_targets = self._resolve_hardlinks(context)
         deleted = match.downloader.delete_task(match.task_ref, bool(self.config.get("delete_source_data", True)))
         if not deleted:
             return self._record("failed", context, match, "downloader delete failed")
 
-        hardlinks = self._delete_hardlinks(context)
+        hardlinks = self._delete_hardlink_targets(hardlink_targets)
         result = self._record("success", context, match, "downloader task deleted")
         result["deleted_hardlinks"] = hardlinks
         return result
@@ -486,6 +487,9 @@ class DeleteExecutor:
         return list(dict.fromkeys(roots))
 
     def _delete_hardlinks(self, context: DeleteContext) -> List[str]:
+        return self._delete_hardlink_targets(self._resolve_hardlinks(context))
+
+    def _resolve_hardlinks(self, context: DeleteContext) -> List[str]:
         if not context.download_path or not context.media_paths:
             return []
 
@@ -498,6 +502,9 @@ class DeleteExecutor:
             media_paths=context.media_paths,
             scope=str(self.config.get("hardlink_scope", "current_file")),
         )
+        return targets
+
+    def _delete_hardlink_targets(self, targets: List[str]) -> List[str]:
         deleted: List[str] = []
         for target in targets:
             path = Path(target)
@@ -535,7 +542,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.6"
+    plugin_version = "0.1.7"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
@@ -911,9 +918,10 @@ class SyncRemover(_PluginBase):
         downloader = str(result.get("downloader") or "-")
         task_ref = str(result.get("task_ref") or "-")
         path = str(target_path or result.get("download_path") or "-")
+        hardlink_count = len(result.get("deleted_hardlinks") or [])
         message = (
-            "同步删除助手：%s完成，状态：%s，原因：%s，下载器：%s，任务：%s，路径：%s"
-            % (action, status, reason, downloader, task_ref, path)
+            "同步删除助手：%s完成，状态：%s，原因：%s，下载器：%s，任务：%s，硬链接：%s，路径：%s"
+            % (action, status, reason, downloader, task_ref, hardlink_count, path)
         )
         if status in {"success", "dry_run"}:
             logger.info(message)

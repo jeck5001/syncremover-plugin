@@ -67,7 +67,7 @@ https://raw.githubusercontent.com/jeck5001/syncremover-plugin/main/package.v2.js
 
 ```text
 同步删除助手：立即执行开始，目标路径：...
-同步删除助手：立即执行完成，状态：dry_run/success/skipped/failed，原因：...，下载器：...，任务：...，路径：...
+同步删除助手：立即执行完成，状态：dry_run/success/skipped/failed，原因：...，下载器：...，任务：...，硬链接：N，路径：...
 ```
 
 状态含义：
@@ -78,6 +78,7 @@ https://raw.githubusercontent.com/jeck5001/syncremover-plugin/main/package.v2.js
 - `failed`：被白名单、路径守卫或下载器删除结果拦截。
 
 如果填的是媒体硬链接路径，匹配成功时原因会显示 `hardlink_path`。
+`硬链接：N` 表示本次额外删除的媒体硬链接数量。
 如果被路径守卫拦截，日志原因会显示当前允许根目录 `allowed roots=...`，把目标路径所在目录加入扫描根目录、媒体目录白名单或下载目录白名单即可。
 
 ## 安全边界

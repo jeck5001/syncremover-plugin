@@ -328,6 +328,7 @@ def test_plugin_run_once_writes_plugin_logs_for_success():
 
     assert any("立即执行开始" in message for message in capture.infos)
     assert any("立即执行完成" in message and "success" in message for message in capture.infos)
+    assert any("硬链接：0" in message for message in capture.infos)
 
 
 def test_plugin_run_once_without_target_is_failed_record():
@@ -456,5 +457,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.6"
+    assert package["SyncRemover"]["version"] == "0.1.7"
     assert package["SyncRemover"]["level"] == 1
