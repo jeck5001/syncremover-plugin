@@ -65,7 +65,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "download_dirs": [],
     "download_dirs_manual": "",
     "path_scan_roots": ["/vol2/1000/media", "/media", "/downloads", "/mnt", "/data", "/volume1"],
+    "path_scan_roots_manual": "/vol2/1000/media\n/media\n/downloads\n/mnt\n/data\n/volume1",
     "path_scan_depth": 2,
+    "manual_target_path": "",
+    "run_once": False,
     "strict_path_guard": True,
     "continue_hardlink_on_downloader_failure": False,
     "dry_run": False,
@@ -496,7 +499,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
@@ -521,10 +524,22 @@ class SyncRemover(_PluginBase):
             merged.get("download_dirs"),
             merged.get("download_dirs_manual"),
         )
+        merged["path_scan_roots"] = self._merge_selected_and_manual_paths(
+            merged.get("path_scan_roots"),
+            merged.get("path_scan_roots_manual"),
+        )
         self._config = merged
         self._enabled = bool(merged.get("enabled"))
         self._audit_store.limit = int(merged.get("audit_limit", 200))
-        self._downloaders = build_host_downloaders(list(merged.get("enabled_downloaders") or []))
+        discovered_downloaders = build_host_downloaders(list(merged.get("enabled_downloaders") or []))
+        if discovered_downloaders:
+            self._downloaders = discovered_downloaders
+        if merged.get("run_once"):
+            try:
+                self.api_run_once()
+            finally:
+                self._config["run_once"] = False
+                self._persist_config()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -538,6 +553,7 @@ class SyncRemover(_PluginBase):
             {"path": "/audit", "endpoint": self.api_audit, "methods": ["GET"], "summary": "同步删除审计记录"},
             {"path": "/retry", "endpoint": self.api_retry, "methods": ["POST"], "summary": "重试审计记录"},
             {"path": "/dry-run", "endpoint": self.api_dry_run, "methods": ["POST"], "summary": "预演删除计划"},
+            {"path": "/run-once", "endpoint": self.api_run_once, "methods": ["POST"], "summary": "立即执行一次"},
             {"path": "/scan-paths", "endpoint": self.api_scan_paths, "methods": ["GET"], "summary": "扫描可选路径"},
             {"path": "/clear-audit", "endpoint": self.api_clear_audit, "methods": ["POST"], "summary": "清空审计记录"},
         ]
@@ -548,86 +564,190 @@ class SyncRemover(_PluginBase):
             {
                 "component": "VForm",
                 "content": [
-                    {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}},
-                    {"component": "VSwitch", "props": {"model": "dry_run", "label": "演练模式"}},
-                    {"component": "VSwitch", "props": {"model": "delete_source_data", "label": "删除原始下载数据"}},
                     {
-                        "component": "VSelect",
+                        "component": "VAlert",
                         "props": {
-                            "model": "hardlink_scope",
-                            "label": "硬链接清理范围",
-                            "items": [
-                                {"title": "仅当前文件", "value": "current_file"},
-                                {"title": "同任务全部媒体硬链接", "value": "whole_task_media"},
-                            ],
+                            "type": "info",
+                            "variant": "tonal",
+                            "text": "先开演练模式验证匹配结果。手动执行需要填写目标路径，保存后运行一次。",
                         },
                     },
                     {
-                        "component": "VSelect",
-                        "props": {
-                            "model": "media_dirs",
-                            "label": "媒体目录白名单（从候选选择）",
-                            "items": path_options,
-                            "multiple": True,
-                            "clearable": True,
-                            "density": "comfortable",
-                            "hideDetails": "auto",
-                        },
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{"component": "VSwitch", "props": {"model": "dry_run", "label": "演练模式"}}],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "delete_source_data", "label": "删除原始下载数据"},
+                                    }
+                                ],
+                            },
+                        ],
                     },
                     {
-                        "component": "VTextarea",
-                        "props": {
-                            "model": "media_dirs_manual",
-                            "label": "手填媒体目录（每行一个）",
-                            "rows": 2,
-                            "autoGrow": True,
-                            "clearable": True,
-                            "density": "comfortable",
-                            "hideDetails": "auto",
-                        },
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "manual_target_path",
+                                            "label": "手动执行目标路径",
+                                            "placeholder": "/vol2/1000/media/download/xxx.mkv",
+                                            "density": "comfortable",
+                                            "hideDetails": "auto",
+                                            "clearable": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "run_once", "label": "立即执行一次"},
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "continue_hardlink_on_downloader_failure",
+                                            "label": "失败仍清理硬链接",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
                     },
                     {
-                        "component": "VSelect",
-                        "props": {
-                            "model": "download_dirs",
-                            "label": "下载目录白名单（从候选选择）",
-                            "items": path_options,
-                            "multiple": True,
-                            "clearable": True,
-                            "density": "comfortable",
-                            "hideDetails": "auto",
-                        },
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "hardlink_scope",
+                                            "label": "硬链接清理范围",
+                                            "items": [
+                                                {"title": "仅当前文件", "value": "current_file"},
+                                                {"title": "同任务全部媒体硬链接", "value": "whole_task_media"},
+                                            ],
+                                            "density": "comfortable",
+                                            "hideDetails": "auto",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "path_scan_roots_manual",
+                                            "label": "路径扫描根目录（每行一个）",
+                                            "rows": 2,
+                                            "autoGrow": True,
+                                            "clearable": True,
+                                            "density": "comfortable",
+                                            "hideDetails": "auto",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
                     },
                     {
-                        "component": "VTextarea",
-                        "props": {
-                            "model": "download_dirs_manual",
-                            "label": "手填下载目录（每行一个）",
-                            "rows": 2,
-                            "autoGrow": True,
-                            "clearable": True,
-                            "density": "comfortable",
-                            "hideDetails": "auto",
-                        },
-                    },
-                    {
-                        "component": "VTextarea",
-                        "props": {
-                            "model": "path_scan_roots",
-                            "label": "路径扫描根目录（每行一个）",
-                            "rows": 2,
-                            "autoGrow": True,
-                            "clearable": True,
-                            "density": "comfortable",
-                            "hideDetails": "auto",
-                        },
-                    },
-                    {
-                        "component": "VSwitch",
-                        "props": {
-                            "model": "continue_hardlink_on_downloader_failure",
-                            "label": "下载器删除失败仍继续清理硬链接",
-                        },
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "media_dirs",
+                                            "label": "媒体目录白名单（从候选选择）",
+                                            "items": path_options,
+                                            "multiple": True,
+                                            "clearable": True,
+                                            "density": "comfortable",
+                                            "hideDetails": "auto",
+                                        },
+                                    },
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "media_dirs_manual",
+                                            "label": "手填媒体目录（每行一个）",
+                                            "rows": 2,
+                                            "autoGrow": True,
+                                            "clearable": True,
+                                            "density": "comfortable",
+                                            "hideDetails": "auto",
+                                        },
+                                    },
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "download_dirs",
+                                            "label": "下载目录白名单（从候选选择）",
+                                            "items": path_options,
+                                            "multiple": True,
+                                            "clearable": True,
+                                            "density": "comfortable",
+                                            "hideDetails": "auto",
+                                        },
+                                    },
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "download_dirs_manual",
+                                            "label": "手填下载目录（每行一个）",
+                                            "rows": 2,
+                                            "autoGrow": True,
+                                            "clearable": True,
+                                            "density": "comfortable",
+                                            "hideDetails": "auto",
+                                        },
+                                    },
+                                ],
+                            },
+                        ],
                     },
                 ],
             }
@@ -686,6 +806,21 @@ class SyncRemover(_PluginBase):
         config["dry_run"] = True
         return DeleteExecutor(config, self._audit_store).execute(context, match)
 
+    def api_run_once(self) -> Dict[str, Any]:
+        target_path = str(self._config.get("manual_target_path") or "").strip()
+        if not target_path:
+            return {"ok": False, "reason": "manual_target_path is required"}
+
+        event_data = {
+            "path": target_path,
+            "download_path": target_path,
+            "title": Path(target_path).name,
+        }
+        event = type("ManualRunEvent", (), {"event_type": "manual.run", "event_data": event_data})()
+        context = self._parser.parse(event)
+        match = TaskMatcher(self._downloaders).match(context)
+        return DeleteExecutor(self._config, self._audit_store).execute(context, match)
+
     def api_scan_paths(self) -> Dict[str, Any]:
         return {"paths": self._path_options()}
 
@@ -716,6 +851,12 @@ class SyncRemover(_PluginBase):
         paths = self._coerce_paths(selected)
         paths.extend(self._coerce_paths(manual))
         return list(dict.fromkeys(paths))
+
+    def _persist_config(self):
+        try:
+            self.update_config(self._config)
+        except Exception:
+            pass
 
     def _coerce_paths(self, value: Any) -> List[str]:
         if not value:

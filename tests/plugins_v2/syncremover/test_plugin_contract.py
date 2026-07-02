@@ -35,8 +35,11 @@ def test_plugin_defaults_are_safe():
     assert "/media" in defaults["path_scan_roots"]
     assert "/downloads" in defaults["path_scan_roots"]
     assert "/vol2/1000/media" in defaults["path_scan_roots"]
+    assert defaults["path_scan_roots_manual"].startswith("/vol2/1000/media\n")
     assert defaults["media_dirs_manual"] == ""
     assert defaults["download_dirs_manual"] == ""
+    assert defaults["manual_target_path"] == ""
+    assert defaults["run_once"] is False
 
 
 def test_plugin_exposes_audit_retry_dry_run_and_clear_api():
@@ -46,7 +49,7 @@ def test_plugin_exposes_audit_retry_dry_run_and_clear_api():
     apis = plugin.get_api()
     paths = {api["path"] for api in apis}
 
-    assert paths == {"/audit", "/retry", "/dry-run", "/clear-audit", "/scan-paths"}
+    assert paths == {"/audit", "/retry", "/dry-run", "/clear-audit", "/scan-paths", "/run-once"}
 
 
 def test_plugin_form_contains_safety_controls():
@@ -65,6 +68,10 @@ def test_plugin_form_contains_safety_controls():
     assert "VCombobox" not in rendered
     assert "chips" not in rendered
     assert "每行一个" in rendered
+    assert "VRow" in rendered
+    assert "VCol" in rendered
+    assert "手动执行目标路径" in rendered
+    assert "立即执行一次" in rendered
     assert defaults["delete_source_data"] is True
 
 
@@ -98,6 +105,86 @@ def test_plugin_merges_selected_and_manual_paths():
 
     assert plugin._config["media_dirs"] == ["/selected/media", "/manual/media"]
     assert plugin._config["download_dirs"] == ["/selected/download", "/manual/download"]
+
+
+def test_plugin_merges_manual_path_scan_roots():
+    module = load_plugin_module()
+    plugin = module.SyncRemover()
+    plugin.init_plugin({"path_scan_roots_manual": "/manual/root\n/vol2/1000/media\n"})
+
+    assert "/manual/root" in plugin._config["path_scan_roots"]
+    assert plugin._config["path_scan_roots"].count("/vol2/1000/media") == 1
+
+
+def test_plugin_run_once_executes_manual_target_path():
+    module = load_plugin_module()
+
+    class Downloader:
+        def __init__(self):
+            self.deleted = []
+
+        def list_torrents(self):
+            return [{"hash": "abc", "save_path": "/downloads/A"}]
+
+        def list_files(self, task_ref):
+            return [{"name": "A.mkv"}]
+
+        def delete_task(self, task_ref, delete_source_data):
+            self.deleted.append((task_ref, delete_source_data))
+            return True
+
+    downloader = Downloader()
+    plugin = module.SyncRemover()
+    plugin._downloaders = {"QB": downloader}
+    plugin.init_plugin(
+        {
+            "run_once": True,
+            "manual_target_path": "/downloads/A/A.mkv",
+            "download_dirs": ["/downloads"],
+        }
+    )
+    result = plugin._audit_store.list_records()[0]
+
+    assert result["status"] == "success"
+    assert result["task_ref"] == "abc"
+    assert downloader.deleted == [("abc", True)]
+    assert plugin._config["run_once"] is False
+
+
+def test_plugin_run_once_resets_saved_flag_after_execution():
+    module = load_plugin_module()
+
+    class Downloader:
+        def list_torrents(self):
+            return [{"hash": "abc", "save_path": "/downloads/A"}]
+
+        def list_files(self, task_ref):
+            return [{"name": "A.mkv"}]
+
+        def delete_task(self, task_ref, delete_source_data):
+            return True
+
+    plugin = module.SyncRemover()
+    plugin._downloaders = {"QB": Downloader()}
+    plugin.init_plugin(
+        {
+            "run_once": True,
+            "manual_target_path": "/downloads/A/A.mkv",
+            "download_dirs": ["/downloads"],
+        }
+    )
+
+    assert plugin.get_config()["run_once"] is False
+
+
+def test_plugin_run_once_without_target_is_failed_record():
+    module = load_plugin_module()
+    plugin = module.SyncRemover()
+
+    result = plugin.api_run_once()
+
+    assert result["ok"] is False
+    assert result["reason"] == "manual_target_path is required"
 
 
 def test_plugin_scan_paths_api_returns_options(tmp_path):
@@ -194,5 +281,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.2"
+    assert package["SyncRemover"]["version"] == "0.1.3"
     assert package["SyncRemover"]["level"] == 1
