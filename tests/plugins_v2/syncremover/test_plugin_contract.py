@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -149,6 +150,51 @@ def test_plugin_run_once_executes_manual_target_path():
     assert result["task_ref"] == "abc"
     assert downloader.deleted == [("abc", True)]
     assert plugin._config["run_once"] is False
+
+
+def test_plugin_run_once_matches_manual_media_hardlink_path(tmp_path):
+    module = load_plugin_module()
+    download_dir = tmp_path / "downloads" / "A"
+    media_dir = tmp_path / "media" / "cartoon"
+    download_dir.mkdir(parents=True)
+    media_dir.mkdir(parents=True)
+    source_file = download_dir / "A.mkv"
+    media_file = media_dir / "A.mkv"
+    source_file.write_text("movie", encoding="utf-8")
+    os.link(source_file, media_file)
+
+    class Downloader:
+        def __init__(self):
+            self.deleted = []
+
+        def list_torrents(self):
+            return [{"hash": "abc", "save_path": str(download_dir)}]
+
+        def list_files(self, task_ref):
+            return [{"name": "A.mkv"}]
+
+        def delete_task(self, task_ref, delete_source_data):
+            self.deleted.append((task_ref, delete_source_data))
+            return True
+
+    downloader = Downloader()
+    plugin = module.SyncRemover()
+    plugin._downloaders = {"QB": downloader}
+    plugin.init_plugin(
+        {
+            "run_once": True,
+            "manual_target_path": str(media_file),
+            "media_dirs": [str(tmp_path / "media")],
+            "download_dirs": [str(tmp_path / "downloads")],
+        }
+    )
+    result = plugin._audit_store.list_records()[0]
+
+    assert result["status"] == "success"
+    assert result["match_reason"] == "hardlink_path"
+    assert result["download_path"] == str(source_file)
+    assert downloader.deleted == [("abc", True)]
+    assert not media_file.exists()
 
 
 def test_plugin_run_once_resets_saved_flag_after_execution():
@@ -343,5 +389,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.4"
+    assert package["SyncRemover"]["version"] == "0.1.5"
     assert package["SyncRemover"]["level"] == 1

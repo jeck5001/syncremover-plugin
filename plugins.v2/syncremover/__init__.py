@@ -231,7 +231,23 @@ class TaskMatcher:
                     full_path = str(Path(save_path) / file_name)
                     if full_path == normalized_path:
                         return MatchResult("matched", name, downloader, task_ref, task, "download_path")
+                    if self._same_existing_hardlink(Path(full_path), Path(normalized_path)):
+                        context.download_path = full_path
+                        return MatchResult("matched", name, downloader, task_ref, task, "hardlink_path")
         return MatchResult(status="not_found")
+
+    def _same_existing_hardlink(self, left: Path, right: Path) -> bool:
+        try:
+            left_stat = left.stat()
+            right_stat = right.stat()
+        except OSError:
+            return False
+        return (
+            left_stat.st_dev == right_stat.st_dev
+            and left_stat.st_ino == right_stat.st_ino
+            and left_stat.st_nlink > 1
+            and right_stat.st_nlink > 1
+        )
 
 
 class HostDownloaderAdapter:
@@ -506,7 +522,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.4"
+    plugin_version = "0.1.5"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
