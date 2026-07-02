@@ -3,7 +3,7 @@
     "name": "同步删除助手",
     "description": "同步删除 qBittorrent、Transmission 和硬链接媒体文件",
     "labels": "下载器,硬链接,删除同步",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "icon": "Moviepilot_A.png",
     "author": "jfwang",
     "system_version": ">=2.12.0",
