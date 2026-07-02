@@ -136,6 +136,94 @@ def test_executor_deletes_scanned_media_hardlink_for_download_path(tmp_path):
     assert media.exists() is False
 
 
+def test_executor_deletes_remaining_download_file_after_all_downloaders_succeed(tmp_path):
+    module = load_plugin_module()
+    download = tmp_path / "downloads" / "A.mkv"
+    download.parent.mkdir()
+    download.write_text("video", encoding="utf-8")
+
+    class RecordingDownloader(FakeDownloader):
+        def __init__(self, name, calls):
+            super().__init__()
+            self.name = name
+            self.shared_calls = calls
+
+        def delete_task(self, task_ref, delete_source_data):
+            self.shared_calls.append((self.name, task_ref, download.exists()))
+            return super().delete_task(task_ref, delete_source_data)
+
+    calls = []
+    qb = RecordingDownloader("qb", calls)
+    tr = RecordingDownloader("tr", calls)
+    matches = [
+        module.MatchResult("matched", "qb", qb, "qb_hash", {"hash": "qb_hash"}, "download_path"),
+        module.MatchResult("matched", "tr", tr, "tr_hash", {"hash": "tr_hash"}, "download_path"),
+    ]
+    audit = module.AuditStore(limit=10)
+    executor = module.DeleteExecutor(
+        config={
+            **module.DEFAULT_CONFIG,
+            "media_dirs": [],
+            "download_dirs": [str(download.parent)],
+            "delete_source_data": True,
+        },
+        audit_store=audit,
+    )
+
+    result = executor.execute_all(
+        module.DeleteContext(
+            "manual.run",
+            media_paths=[],
+            download_path=str(download),
+            source="manual",
+            confidence="path",
+        ),
+        matches,
+    )
+
+    assert result["status"] == "success"
+    assert calls == [("qb", "qb_hash", True), ("tr", "tr_hash", True)]
+    assert result["deleted_files"] == [str(download)]
+    assert download.exists() is False
+
+
+def test_executor_keeps_download_file_when_any_downloader_delete_fails(tmp_path):
+    module = load_plugin_module()
+    download = tmp_path / "downloads" / "A.mkv"
+    download.parent.mkdir()
+    download.write_text("video", encoding="utf-8")
+    qb = FakeDownloader()
+    tr = FakeDownloader(should_delete=False)
+    matches = [
+        module.MatchResult("matched", "qb", qb, "qb_hash", {"hash": "qb_hash"}, "download_path"),
+        module.MatchResult("matched", "tr", tr, "tr_hash", {"hash": "tr_hash"}, "download_path"),
+    ]
+    audit = module.AuditStore(limit=10)
+    executor = module.DeleteExecutor(
+        config={
+            **module.DEFAULT_CONFIG,
+            "media_dirs": [],
+            "download_dirs": [str(download.parent)],
+            "delete_source_data": True,
+        },
+        audit_store=audit,
+    )
+
+    result = executor.execute_all(
+        module.DeleteContext(
+            "manual.run",
+            media_paths=[],
+            download_path=str(download),
+            source="manual",
+            confidence="path",
+        ),
+        matches,
+    )
+
+    assert result["status"] == "failed"
+    assert download.exists()
+
+
 def test_executor_resolves_hardlinks_before_downloader_deletes_source(tmp_path):
     module = load_plugin_module()
     download = tmp_path / "downloads" / "A.mkv"

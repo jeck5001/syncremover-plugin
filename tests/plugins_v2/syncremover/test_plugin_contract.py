@@ -73,6 +73,7 @@ def test_plugin_form_contains_safety_controls():
     assert "VCol" in rendered
     assert "手动执行目标路径" in rendered
     assert "立即执行一次" in rendered
+    assert "失败仍清理硬链接" not in rendered
     assert defaults["delete_source_data"] is True
 
 
@@ -583,6 +584,76 @@ def test_plugin_dry_run_api_evaluates_payload_without_delete():
     assert response["task_ref"] == "abc"
 
 
+def test_plugin_dry_run_api_reports_all_matching_downloaders():
+    module = load_plugin_module()
+    plugin = module.SyncRemover()
+    plugin.init_plugin({"enabled": True, "download_dirs": ["/downloads"]})
+
+    class Downloader:
+        def __init__(self, task_hash):
+            self.task_hash = task_hash
+            self.deleted = []
+
+        def list_torrents(self):
+            return [{"hash": self.task_hash, "save_path": "/downloads/A"}]
+
+        def list_files(self, task_ref):
+            return [{"name": "A.mkv"}]
+
+        def delete_task(self, task_ref, delete_source_data):
+            self.deleted.append((task_ref, delete_source_data))
+            return True
+
+    qb = Downloader("qb_hash")
+    tr = Downloader("tr_hash")
+    plugin._downloaders = {"qb": qb, "tr": tr}
+
+    response = plugin.api_dry_run({"download_path": "/downloads/A/A.mkv"})
+
+    assert response["status"] == "dry_run"
+    assert response["downloader"] == "qb,tr"
+    assert response["task_ref"] == "qb_hash,tr_hash"
+    assert qb.deleted == []
+    assert tr.deleted == []
+
+
+def test_plugin_enabled_event_deletes_all_matching_downloaders():
+    module = load_plugin_module()
+    plugin = module.SyncRemover()
+    plugin.init_plugin({"enabled": True, "download_dirs": ["/downloads"]})
+
+    class Downloader:
+        def __init__(self, task_hash):
+            self.task_hash = task_hash
+            self.deleted = []
+
+        def list_torrents(self):
+            return [{"hash": self.task_hash, "save_path": "/downloads/A"}]
+
+        def list_files(self, task_ref):
+            return [{"name": "A.mkv"}]
+
+        def delete_task(self, task_ref, delete_source_data):
+            self.deleted.append((task_ref, delete_source_data))
+            return True
+
+    qb = Downloader("qb_hash")
+    tr = Downloader("tr_hash")
+    plugin._downloaders = {"qb": qb, "tr": tr}
+    event = type(
+        "Event",
+        (),
+        {"event_type": "downloadfile.deleted", "event_data": {"download_path": "/downloads/A/A.mkv"}},
+    )()
+
+    response = plugin.handle_delete_event(event)
+
+    assert response["status"] == "success"
+    assert response["downloader"] == "qb,tr"
+    assert qb.deleted == [("qb_hash", True)]
+    assert tr.deleted == [("tr_hash", True)]
+
+
 def test_plugin_retry_replays_matched_audit_record():
     module = load_plugin_module()
     plugin = module.SyncRemover()
@@ -629,5 +700,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.10"
+    assert package["SyncRemover"]["version"] == "0.1.11"
     assert package["SyncRemover"]["level"] == 1

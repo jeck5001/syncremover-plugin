@@ -472,18 +472,24 @@ class DeleteExecutor:
             return self._record("dry_run", context, match, "dry run enabled")
 
         hardlink_targets = self._resolve_hardlinks(context)
+        file_targets = self._resolve_download_file_targets(context, hardlink_targets)
         deleted = match.downloader.delete_task(match.task_ref, bool(self.config.get("delete_source_data", True)))
         if not deleted:
             return self._record("failed", context, match, "downloader delete failed")
 
         hardlinks = self._delete_hardlink_targets(hardlink_targets)
+        files = self._delete_file_targets(file_targets)
         result = self._record("success", context, match, "downloader task deleted")
         result["deleted_hardlinks"] = hardlinks
+        result["deleted_files"] = files
         return result
 
     def execute_all(self, context: DeleteContext, matches: List[MatchResult]) -> Dict[str, Any]:
         matched = [match for match in matches if match.status == "matched"]
         if not matched:
+            pending = next((match for match in matches if match.status == "pending_confirm"), None)
+            if pending:
+                return self.execute(context, pending)
             return self._record("skipped", context, MatchResult(status="not_found"), "not_found")
         if len(matched) == 1:
             return self.execute(context, matched[0])
@@ -502,6 +508,7 @@ class DeleteExecutor:
             return self._record("dry_run", context, summary_match, "dry run enabled")
 
         hardlink_targets = self._resolve_hardlinks(context)
+        file_targets = self._resolve_download_file_targets(context, hardlink_targets)
         for match in matched:
             deleted = match.downloader.delete_task(match.task_ref, bool(self.config.get("delete_source_data", True)))
             if not deleted:
@@ -513,8 +520,10 @@ class DeleteExecutor:
                 )
 
         hardlinks = self._delete_hardlink_targets(hardlink_targets)
+        files = self._delete_file_targets(file_targets)
         result = self._record("success", context, summary_match, "downloader tasks deleted")
         result["deleted_hardlinks"] = hardlinks
+        result["deleted_files"] = files
         return result
 
     def _path_guard_allows(self, context: DeleteContext) -> bool:
@@ -550,6 +559,25 @@ class DeleteExecutor:
 
     def _delete_hardlinks(self, context: DeleteContext) -> List[str]:
         return self._delete_hardlink_targets(self._resolve_hardlinks(context))
+
+    def _resolve_download_file_targets(self, context: DeleteContext, hardlink_targets: List[str]) -> List[str]:
+        if not self.config.get("delete_source_data", True) or not context.download_path:
+            return []
+
+        target = Path(context.download_path)
+        try:
+            if not target.exists() or not target.is_file():
+                return []
+            resolved_target = target.resolve()
+            resolved_hardlinks = {Path(path).resolve() for path in hardlink_targets}
+        except OSError:
+            return []
+
+        if resolved_target in resolved_hardlinks:
+            return []
+        if not self._is_under(target, self._allowed_roots(context)):
+            return []
+        return [str(target)]
 
     def _resolve_hardlinks(self, context: DeleteContext) -> List[str]:
         if not context.download_path:
@@ -608,6 +636,18 @@ class DeleteExecutor:
                 deleted.append(target)
         return deleted
 
+    def _delete_file_targets(self, targets: List[str]) -> List[str]:
+        deleted: List[str] = []
+        for target in targets:
+            path = Path(target)
+            try:
+                if path.exists() and path.is_file():
+                    path.unlink()
+                    deleted.append(target)
+            except OSError:
+                continue
+        return deleted
+
     def _is_under(self, path: Path, roots: List[Path]) -> bool:
         resolved = path.resolve()
         for root in roots:
@@ -637,7 +677,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.10"
+    plugin_version = "0.1.11"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
@@ -740,7 +780,7 @@ class SyncRemover(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12, "md": 8},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -757,24 +797,11 @@ class SyncRemover(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VSwitch",
                                         "props": {"model": "run_once", "label": "立即执行一次"},
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "continue_hardlink_on_downloader_failure",
-                                            "label": "失败仍清理硬链接",
-                                        },
                                     }
                                 ],
                             },
@@ -941,10 +968,10 @@ class SyncRemover(_PluginBase):
     def api_dry_run(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         event = type("DryRunEvent", (), {"event_type": "dry_run", "event_data": payload or {}})()
         context = self._parser.parse(event)
-        match = TaskMatcher(self._downloaders).match(context)
+        matches = TaskMatcher(self._downloaders).match_all(context)
         config = dict(self._config)
         config["dry_run"] = True
-        result = DeleteExecutor(config, self._audit_store).execute(context, match)
+        result = DeleteExecutor(config, self._audit_store).execute_all(context, matches)
         self._log_result("演练", result)
         return result
 
@@ -1134,9 +1161,9 @@ class SyncRemover(_PluginBase):
             return None
         context = self._parser.parse(event)
         matcher = TaskMatcher(self._downloaders)
-        match = matcher.match(context)
+        matches = matcher.match_all(context)
         executor = DeleteExecutor(self._config, self._audit_store)
-        result = executor.execute(context, match)
+        result = executor.execute_all(context, matches)
         self._log_result("事件删除", result)
         return result
 
@@ -1168,9 +1195,10 @@ class SyncRemover(_PluginBase):
         task_ref = str(result.get("task_ref") or "-")
         path = str(target_path or result.get("download_path") or "-")
         hardlink_count = len(result.get("deleted_hardlinks") or [])
+        file_count = len(result.get("deleted_files") or [])
         message = (
-            "同步删除助手：%s完成，状态：%s，原因：%s，下载器：%s，任务：%s，硬链接：%s，路径：%s"
-            % (action, status, reason, downloader, task_ref, hardlink_count, path)
+            "同步删除助手：%s完成，状态：%s，原因：%s，下载器：%s，任务：%s，硬链接：%s，文件：%s，路径：%s"
+            % (action, status, reason, downloader, task_ref, hardlink_count, file_count, path)
         )
         if status in {"success", "dry_run"}:
             logger.info(message)

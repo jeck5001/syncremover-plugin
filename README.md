@@ -14,7 +14,9 @@ https://raw.githubusercontent.com/jeck5001/syncremover-plugin/main/package.v2.js
 
 - 支持 qBittorrent 和 Transmission。
 - 同一个媒体或下载路径同时命中 qBittorrent 和 Transmission 时，会删除所有匹配任务。
-- 删除下载器任务时默认同时删除原始下载数据。
+- 删除顺序固定为：先删全部匹配到的 qB/TR 任务，全部成功后才删硬链接和残留下载源文件。
+- 任意一个下载器任务删除失败时，插件不会删除磁盘文件，避免任务残留后重新下载。
+- 删除下载器任务时默认同时删除原始下载数据；如果下载器没有删干净，插件会在任务删除成功后补删仍存在的下载源文件。
 - 支持按下载源路径或媒体硬链接路径手动执行一次。
 - 手动目标路径留空时，会按媒体目录白名单和下载目录白名单批量执行。
 - 支持演练模式，先看匹配和删除计划，不实际删除。
@@ -69,7 +71,7 @@ https://raw.githubusercontent.com/jeck5001/syncremover-plugin/main/package.v2.js
 
 ```text
 同步删除助手：立即执行开始，目标路径：...
-同步删除助手：立即执行完成，状态：dry_run/success/skipped/failed，原因：...，下载器：...，任务：...，硬链接：N，路径：...
+同步删除助手：立即执行完成，状态：dry_run/success/skipped/failed，原因：...，下载器：...，任务：...，硬链接：N，文件：N，路径：...
 ```
 
 状态含义：
@@ -81,6 +83,7 @@ https://raw.githubusercontent.com/jeck5001/syncremover-plugin/main/package.v2.js
 
 如果填的是媒体硬链接路径，匹配成功时原因会显示 `hardlink_path`。
 `硬链接：N` 表示本次额外删除的媒体硬链接数量。
+`文件：N` 表示下载器任务删除成功后，插件兜底补删的残留下载源文件数量。
 如果被路径守卫拦截，日志原因会显示当前允许根目录 `allowed roots=...`，把目标路径所在目录加入扫描根目录、媒体目录白名单或下载目录白名单即可。
 
 ## 安全边界
@@ -88,6 +91,8 @@ https://raw.githubusercontent.com/jeck5001/syncremover-plugin/main/package.v2.js
 - 插件默认关闭，需要手动启用。
 - 删除原始下载数据默认开启，可在配置里关闭。
 - 严格路径守卫默认开启，只处理媒体目录和下载目录白名单内路径。
+- 找不到对应下载器任务时默认只记录 `skipped`，不会直接删除磁盘文件。
+- 只要找到下载器任务，就必须先把全部匹配任务删成功，才会继续删除硬链接或残留文件。
 - 仅标题匹配不会自动删除。
 - 插件不会全盘扫描硬链接。
 
