@@ -61,8 +61,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "hardlink_scope": "current_file",
     "enabled_downloaders": ["qbittorrent", "transmission"],
     "media_dirs": [],
+    "media_dirs_manual": "",
     "download_dirs": [],
-    "path_scan_roots": ["/media", "/downloads", "/mnt", "/data", "/volume1"],
+    "download_dirs_manual": "",
+    "path_scan_roots": ["/vol2/1000/media", "/media", "/downloads", "/mnt", "/data", "/volume1"],
     "path_scan_depth": 2,
     "strict_path_guard": True,
     "continue_hardlink_on_downloader_failure": False,
@@ -494,7 +496,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
@@ -511,6 +513,14 @@ class SyncRemover(_PluginBase):
     def init_plugin(self, config: dict = None):
         merged = dict(DEFAULT_CONFIG)
         merged.update(config or {})
+        merged["media_dirs"] = self._merge_selected_and_manual_paths(
+            merged.get("media_dirs"),
+            merged.get("media_dirs_manual"),
+        )
+        merged["download_dirs"] = self._merge_selected_and_manual_paths(
+            merged.get("download_dirs"),
+            merged.get("download_dirs_manual"),
+        )
         self._config = merged
         self._enabled = bool(merged.get("enabled"))
         self._audit_store.limit = int(merged.get("audit_limit", 200))
@@ -553,36 +563,63 @@ class SyncRemover(_PluginBase):
                         },
                     },
                     {
-                        "component": "VCombobox",
+                        "component": "VSelect",
                         "props": {
                             "model": "media_dirs",
-                            "label": "媒体目录白名单（可选择或手填）",
+                            "label": "媒体目录白名单（从候选选择）",
                             "items": path_options,
                             "multiple": True,
-                            "chips": True,
                             "clearable": True,
+                            "density": "comfortable",
+                            "hideDetails": "auto",
                         },
                     },
                     {
-                        "component": "VCombobox",
+                        "component": "VTextarea",
+                        "props": {
+                            "model": "media_dirs_manual",
+                            "label": "手填媒体目录（每行一个）",
+                            "rows": 2,
+                            "autoGrow": True,
+                            "clearable": True,
+                            "density": "comfortable",
+                            "hideDetails": "auto",
+                        },
+                    },
+                    {
+                        "component": "VSelect",
                         "props": {
                             "model": "download_dirs",
-                            "label": "下载目录白名单（可选择或手填）",
+                            "label": "下载目录白名单（从候选选择）",
                             "items": path_options,
                             "multiple": True,
-                            "chips": True,
                             "clearable": True,
+                            "density": "comfortable",
+                            "hideDetails": "auto",
                         },
                     },
                     {
-                        "component": "VCombobox",
+                        "component": "VTextarea",
+                        "props": {
+                            "model": "download_dirs_manual",
+                            "label": "手填下载目录（每行一个）",
+                            "rows": 2,
+                            "autoGrow": True,
+                            "clearable": True,
+                            "density": "comfortable",
+                            "hideDetails": "auto",
+                        },
+                    },
+                    {
+                        "component": "VTextarea",
                         "props": {
                             "model": "path_scan_roots",
-                            "label": "路径扫描根目录（可选择或手填）",
-                            "items": path_options,
-                            "multiple": True,
-                            "chips": True,
+                            "label": "路径扫描根目录（每行一个）",
+                            "rows": 2,
+                            "autoGrow": True,
                             "clearable": True,
+                            "density": "comfortable",
+                            "hideDetails": "auto",
                         },
                     },
                     {
@@ -670,10 +707,26 @@ class SyncRemover(_PluginBase):
         return self.handle_delete_event(event)
 
     def _path_options(self) -> List[str]:
-        roots = list(self._config.get("path_scan_roots") or [])
+        roots = self._coerce_paths(self._config.get("path_scan_roots"))
         roots.extend(self._config.get("media_dirs") or [])
         roots.extend(self._config.get("download_dirs") or [])
         return PathScanner(roots, max_depth=int(self._config.get("path_scan_depth", 2))).scan()
+
+    def _merge_selected_and_manual_paths(self, selected: Any, manual: Any) -> List[str]:
+        paths = self._coerce_paths(selected)
+        paths.extend(self._coerce_paths(manual))
+        return list(dict.fromkeys(paths))
+
+    def _coerce_paths(self, value: Any) -> List[str]:
+        if not value:
+            return []
+        if isinstance(value, str):
+            candidates = value.replace(",", "\n").splitlines()
+        elif isinstance(value, list):
+            candidates = value
+        else:
+            candidates = [value]
+        return [str(item).strip() for item in candidates if str(item).strip()]
 
     def stop_service(self):
         self._enabled = False
