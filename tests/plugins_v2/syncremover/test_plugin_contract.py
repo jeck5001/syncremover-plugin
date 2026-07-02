@@ -152,6 +152,43 @@ def test_plugin_run_once_executes_manual_target_path():
     assert plugin._config["run_once"] is False
 
 
+def test_plugin_run_once_deletes_all_matching_downloaders():
+    module = load_plugin_module()
+
+    class Downloader:
+        def __init__(self, task_hash):
+            self.task_hash = task_hash
+            self.deleted = []
+
+        def list_torrents(self):
+            return [{"hash": self.task_hash, "save_path": "/downloads/A"}]
+
+        def list_files(self, task_ref):
+            return [{"name": "A.mkv"}]
+
+        def delete_task(self, task_ref, delete_source_data):
+            self.deleted.append((task_ref, delete_source_data))
+            return True
+
+    qb = Downloader("qb_hash")
+    tr = Downloader("tr_hash")
+    plugin = module.SyncRemover()
+    plugin._downloaders = {"qb": qb, "tr": tr}
+    plugin.init_plugin(
+        {
+            "run_once": True,
+            "manual_target_path": "/downloads/A/A.mkv",
+            "download_dirs": ["/downloads"],
+        }
+    )
+    result = plugin._audit_store.list_records()[0]
+
+    assert result["status"] == "success"
+    assert qb.deleted == [("qb_hash", True)]
+    assert tr.deleted == [("tr_hash", True)]
+    assert result["downloader"] == "qb,tr"
+
+
 def test_plugin_run_once_matches_manual_media_hardlink_path(tmp_path):
     module = load_plugin_module()
     download_dir = tmp_path / "downloads" / "A"
@@ -451,6 +488,53 @@ def test_plugin_run_once_without_target_executes_media_hardlink_whitelist(tmp_pa
     assert not media_file.exists()
 
 
+def test_plugin_run_once_without_target_executes_media_name_whitelist(tmp_path):
+    module = load_plugin_module()
+    media_dir = tmp_path / "media" / "cartoon" / "Walking.The.Way.All.Alone.S01.2026.2160p.WEB-DL"
+    media_dir.mkdir(parents=True)
+    media_file = media_dir / "Walking.The.Way.All.Alone.S01E01.mkv"
+    media_file.write_text("movie", encoding="utf-8")
+
+    class Downloader:
+        def __init__(self):
+            self.deleted = []
+
+        def list_torrents(self):
+            return [
+                {
+                    "hash": "abc",
+                    "name": "Walking.The.Way.All.Alone.S01.2026.2160p.WEB-DL",
+                    "save_path": "/not-mounted/downloads",
+                }
+            ]
+
+        def list_files(self, task_ref):
+            return [{"name": "Walking.The.Way.All.Alone.S01E01.mkv"}]
+
+        def delete_task(self, task_ref, delete_source_data):
+            self.deleted.append((task_ref, delete_source_data))
+            return True
+
+    downloader = Downloader()
+    plugin = module.SyncRemover()
+    plugin._downloaders = {"tr": downloader}
+    plugin.init_plugin(
+        {
+            "run_once": True,
+            "manual_target_path": "",
+            "download_dirs": [],
+            "media_dirs": [str(media_dir)],
+            "path_scan_roots_manual": "",
+        }
+    )
+    result = plugin._audit_store.list_records()[0]
+
+    assert downloader.deleted == [("abc", True)]
+    assert result["status"] == "success"
+    assert result["match_reason"] == "media_name"
+    assert media_file.exists()
+
+
 def test_plugin_scan_paths_api_returns_options(tmp_path):
     module = load_plugin_module()
     plugin = module.SyncRemover()
@@ -545,5 +629,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.8"
+    assert package["SyncRemover"]["version"] == "0.1.10"
     assert package["SyncRemover"]["level"] == 1

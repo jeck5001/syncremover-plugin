@@ -183,58 +183,84 @@ class TaskMatcher:
         self.history_lookup = history_lookup
 
     def match(self, context: DeleteContext) -> MatchResult:
-        if context.confidence == "title_only":
-            return MatchResult(status="pending_confirm", reason="title_only")
+        matches = self.match_all(context)
+        if matches:
+            return matches[0]
+        return MatchResult(status="not_found", reason="not_found")
 
-        direct = self._match_direct_task(context)
-        if direct.status == "matched":
+    def match_all(self, context: DeleteContext) -> List[MatchResult]:
+        if context.confidence == "title_only":
+            return [MatchResult(status="pending_confirm", reason="title_only")]
+
+        direct = self._match_direct_tasks(context)
+        if direct:
             return direct
 
-        path_result = self._match_by_path(context, context.download_path)
-        if path_result.status == "matched":
-            return path_result
+        path_results = self._match_by_path_all(context, context.download_path)
+        if path_results:
+            return path_results
 
         if self.history_lookup:
             history_path = self.history_lookup(context)
             if history_path:
-                history_result = self._match_by_path(context, history_path)
-                if history_result.status == "matched":
+                history_results = self._match_by_path_all(context, history_path)
+                for history_result in history_results:
                     history_result.reason = "history_path"
-                    return history_result
+                if history_results:
+                    return history_results
 
-        return MatchResult(status="not_found", reason="not_found")
+        return []
 
     def _match_direct_task(self, context: DeleteContext) -> MatchResult:
+        matches = self._match_direct_tasks(context)
+        if matches:
+            return matches[0]
+        return MatchResult(status="not_found")
+
+    def _match_direct_tasks(self, context: DeleteContext) -> List[MatchResult]:
+        matches: List[MatchResult] = []
         for name, downloader in self.downloaders.items():
             for task in downloader.list_torrents():
                 task_hash = task.get("hash") or task.get("hashString")
                 task_id = task.get("id")
                 if context.torrent_hash and task_hash == context.torrent_hash:
-                    return MatchResult("matched", name, downloader, task_hash, task, "hash")
-                if context.torrent_id is not None and task_id == context.torrent_id:
-                    return MatchResult("matched", name, downloader, task_id, task, "id")
-        return MatchResult(status="not_found")
+                    matches.append(MatchResult("matched", name, downloader, task_hash, task, "hash"))
+                elif context.torrent_id is not None and task_id == context.torrent_id:
+                    matches.append(MatchResult("matched", name, downloader, task_id, task, "id"))
+        return matches
 
     def _match_by_path(self, context: DeleteContext, path: Optional[str]) -> MatchResult:
+        matches = self._match_by_path_all(context, path)
+        if matches:
+            return matches[0]
+        return MatchResult(status="not_found")
+
+    def _match_by_path_all(self, context: DeleteContext, path: Optional[str]) -> List[MatchResult]:
         if not path:
-            return MatchResult(status="not_found")
+            return []
 
         normalized_path = str(Path(path))
+        matches: List[MatchResult] = []
+        seen = set()
         for name, downloader in self.downloaders.items():
             for task in downloader.list_torrents():
                 task_ref = task.get("hash") or task.get("hashString") or task.get("id")
-                if task_ref is None:
+                if task_ref is None or (name, task_ref) in seen:
                     continue
                 save_path = task.get("save_path") or task.get("downloadDir") or task.get("download_dir") or ""
                 for file_info in downloader.list_files(task_ref):
                     file_name = file_info.get("name") or file_info.get("path") or ""
                     full_path = str(Path(save_path) / file_name)
                     if full_path == normalized_path:
-                        return MatchResult("matched", name, downloader, task_ref, task, "download_path")
+                        matches.append(MatchResult("matched", name, downloader, task_ref, task, "download_path"))
+                        seen.add((name, task_ref))
+                        break
                     if self._same_existing_hardlink(Path(full_path), Path(normalized_path)):
                         context.download_path = full_path
-                        return MatchResult("matched", name, downloader, task_ref, task, "hardlink_path")
-        return MatchResult(status="not_found")
+                        matches.append(MatchResult("matched", name, downloader, task_ref, task, "hardlink_path"))
+                        seen.add((name, task_ref))
+                        break
+        return matches
 
     def _same_existing_hardlink(self, left: Path, right: Path) -> bool:
         try:
@@ -455,6 +481,42 @@ class DeleteExecutor:
         result["deleted_hardlinks"] = hardlinks
         return result
 
+    def execute_all(self, context: DeleteContext, matches: List[MatchResult]) -> Dict[str, Any]:
+        matched = [match for match in matches if match.status == "matched"]
+        if not matched:
+            return self._record("skipped", context, MatchResult(status="not_found"), "not_found")
+        if len(matched) == 1:
+            return self.execute(context, matched[0])
+
+        path_guard_reason = self._path_guard_rejection_reason(context)
+        summary_match = MatchResult(
+            status="matched",
+            downloader_name=",".join(str(match.downloader_name) for match in matched),
+            task_ref=",".join(str(match.task_ref) for match in matched),
+            reason="multi_downloader",
+        )
+        if path_guard_reason:
+            return self._record("failed", context, summary_match, path_guard_reason)
+
+        if self.config.get("dry_run"):
+            return self._record("dry_run", context, summary_match, "dry run enabled")
+
+        hardlink_targets = self._resolve_hardlinks(context)
+        for match in matched:
+            deleted = match.downloader.delete_task(match.task_ref, bool(self.config.get("delete_source_data", True)))
+            if not deleted:
+                return self._record(
+                    "failed",
+                    context,
+                    summary_match,
+                    "downloader delete failed: %s/%s" % (match.downloader_name, match.task_ref),
+                )
+
+        hardlinks = self._delete_hardlink_targets(hardlink_targets)
+        result = self._record("success", context, summary_match, "downloader tasks deleted")
+        result["deleted_hardlinks"] = hardlinks
+        return result
+
     def _path_guard_allows(self, context: DeleteContext) -> bool:
         return self._path_guard_rejection_reason(context) is None
 
@@ -490,19 +552,52 @@ class DeleteExecutor:
         return self._delete_hardlink_targets(self._resolve_hardlinks(context))
 
     def _resolve_hardlinks(self, context: DeleteContext) -> List[str]:
-        if not context.download_path or not context.media_paths:
+        if not context.download_path:
             return []
 
+        media_paths = context.media_paths or self._scan_media_hardlinks(context.download_path)
         resolver = HardlinkResolver(
             media_dirs=list(self.config.get("media_dirs", [])),
             download_dirs=list(self.config.get("download_dirs", [])),
         )
         targets = resolver.resolve(
             source_paths=[context.download_path],
-            media_paths=context.media_paths,
+            media_paths=media_paths,
             scope=str(self.config.get("hardlink_scope", "current_file")),
         )
         return targets
+
+    def _scan_media_hardlinks(self, source_path: str) -> List[str]:
+        source = Path(source_path)
+        try:
+            source_stat = source.stat()
+        except OSError:
+            return []
+
+        matches: List[str] = []
+        for root in self.config.get("media_dirs", []):
+            root_path = Path(root)
+            try:
+                candidates = root_path.rglob("*")
+            except OSError:
+                continue
+            for candidate in candidates:
+                if not candidate.is_file():
+                    continue
+                try:
+                    if candidate.resolve() == source.resolve():
+                        continue
+                    candidate_stat = candidate.stat()
+                except OSError:
+                    continue
+                if (
+                    source_stat.st_dev == candidate_stat.st_dev
+                    and source_stat.st_ino == candidate_stat.st_ino
+                    and source_stat.st_nlink > 1
+                    and candidate_stat.st_nlink > 1
+                ):
+                    matches.append(str(candidate))
+        return list(dict.fromkeys(matches))
 
     def _delete_hardlink_targets(self, targets: List[str]) -> List[str]:
         deleted: List[str] = []
@@ -542,7 +637,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.8"
+    plugin_version = "0.1.10"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
@@ -867,8 +962,8 @@ class SyncRemover(_PluginBase):
         event = type("ManualRunEvent", (), {"event_type": "manual.run", "event_data": event_data})()
         context = self._parser.parse(event)
         context.source = "manual"
-        match = TaskMatcher(self._downloaders).match(context)
-        result = DeleteExecutor(self._config, self._audit_store).execute(context, match)
+        matches = TaskMatcher(self._downloaders).match_all(context)
+        result = DeleteExecutor(self._config, self._audit_store).execute_all(context, matches)
         self._log_result("立即执行", result, target_path=target_path)
         return result
 
@@ -886,8 +981,10 @@ class SyncRemover(_PluginBase):
         )
         results: List[Dict[str, Any]] = []
         handled_tasks = set()
+        scanned_tasks = 0
         for downloader_name, downloader in self._downloaders.items():
             for task in downloader.list_torrents():
+                scanned_tasks += 1
                 task_ref = task.get("hash") or task.get("hashString") or task.get("id")
                 if task_ref is None or (downloader_name, task_ref) in handled_tasks:
                     continue
@@ -904,8 +1001,8 @@ class SyncRemover(_PluginBase):
                     results.append(result)
 
         if not results:
-            logger.warning("同步删除助手：白名单批量执行完成，未找到白名单内下载器任务")
-            return {"ok": False, "reason": "no whitelisted downloader task found", "total": 0}
+            logger.warning("同步删除助手：白名单批量执行完成，未找到白名单内下载器任务，已扫描任务：%s", scanned_tasks)
+            return {"ok": False, "reason": "no whitelisted downloader task found", "total": 0, "scanned": scanned_tasks}
 
         logger.info("同步删除助手：白名单批量执行完成，共处理：%s", len(results))
         return {"ok": True, "total": len(results), "results": results}
@@ -924,6 +1021,11 @@ class SyncRemover(_PluginBase):
             file_name = file_info.get("name") or file_info.get("path") or ""
             full_path = str(Path(save_path) / file_name)
             media_path = self._find_hardlinked_media_path(Path(full_path), media_roots)
+            match_reason = "hardlink_path" if media_path else "whitelist_path"
+            if not media_path:
+                media_path = self._find_named_media_path(task, file_name, media_roots)
+                if media_path:
+                    match_reason = "media_name"
             if not media_path and not self._path_is_under_any(full_path, download_roots + media_roots):
                 continue
 
@@ -940,12 +1042,46 @@ class SyncRemover(_PluginBase):
                 downloader=downloader,
                 task_ref=task_ref,
                 task=task,
-                reason="hardlink_path" if media_path else "whitelist_path",
+                reason=match_reason,
             )
             result = DeleteExecutor(self._config, self._audit_store).execute(context, match)
             self._log_result("白名单批量", result, target_path=media_path or full_path)
             return result
         return None
+
+    def _find_named_media_path(self, task: Dict[str, Any], file_name: str, media_roots: List[str]) -> Optional[str]:
+        source_names = [
+            str(task.get("name") or ""),
+            Path(file_name).name,
+            Path(file_name).stem,
+        ]
+        for candidate in self._iter_media_name_candidates(media_roots):
+            candidate_names = [candidate.name, candidate.stem]
+            if any(self._names_match(candidate_name, source_name) for candidate_name in candidate_names for source_name in source_names):
+                return str(candidate)
+        return None
+
+    def _iter_media_name_candidates(self, media_roots: List[str]) -> Iterable[Path]:
+        for root in media_roots:
+            root_path = Path(root)
+            if root_path.exists():
+                yield root_path
+            if root_path.is_file():
+                continue
+            try:
+                yield from (path for path in root_path.rglob("*") if path.is_file())
+            except OSError:
+                continue
+
+    def _names_match(self, left: str, right: str) -> bool:
+        left_normalized = self._normalize_match_name(left)
+        right_normalized = self._normalize_match_name(right)
+        if len(left_normalized) < 8 or len(right_normalized) < 8:
+            return False
+        return left_normalized in right_normalized or right_normalized in left_normalized
+
+    def _normalize_match_name(self, value: str) -> str:
+        return "".join(char.lower() for char in value if char.isalnum())
 
     def _find_hardlinked_media_path(self, source_path: Path, media_roots: List[str]) -> Optional[str]:
         try:

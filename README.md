@@ -13,6 +13,7 @@ https://raw.githubusercontent.com/jeck5001/syncremover-plugin/main/package.v2.js
 ## 主要能力
 
 - 支持 qBittorrent 和 Transmission。
+- 同一个媒体或下载路径同时命中 qBittorrent 和 Transmission 时，会删除所有匹配任务。
 - 删除下载器任务时默认同时删除原始下载数据。
 - 支持按下载源路径或媒体硬链接路径手动执行一次。
 - 手动目标路径留空时，会按媒体目录白名单和下载目录白名单批量执行。

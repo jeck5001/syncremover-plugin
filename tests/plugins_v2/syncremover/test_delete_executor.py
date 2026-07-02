@@ -99,6 +99,43 @@ def test_executor_deletes_current_hardlink_after_downloader_success(tmp_path):
     assert media.exists() is False
 
 
+def test_executor_deletes_scanned_media_hardlink_for_download_path(tmp_path):
+    module = load_plugin_module()
+    download = tmp_path / "downloads" / "A.mkv"
+    media = tmp_path / "media" / "A.mkv"
+    download.parent.mkdir()
+    media.parent.mkdir()
+    download.write_text("video", encoding="utf-8")
+    media.hardlink_to(download)
+    downloader = FakeDownloader()
+    match = module.MatchResult("matched", "qbittorrent", downloader, "abc", {"hash": "abc"}, "hash")
+    audit = module.AuditStore(limit=10)
+    executor = module.DeleteExecutor(
+        config={
+            **module.DEFAULT_CONFIG,
+            "media_dirs": [str(media.parent)],
+            "download_dirs": [str(download.parent)],
+            "hardlink_scope": "current_file",
+        },
+        audit_store=audit,
+    )
+
+    result = executor.execute(
+        module.DeleteContext(
+            "manual.run",
+            media_paths=[],
+            download_path=str(download),
+            source="manual",
+            confidence="direct_task",
+        ),
+        match,
+    )
+
+    assert result["status"] == "success"
+    assert result["deleted_hardlinks"] == [str(media)]
+    assert media.exists() is False
+
+
 def test_executor_resolves_hardlinks_before_downloader_deletes_source(tmp_path):
     module = load_plugin_module()
     download = tmp_path / "downloads" / "A.mkv"
