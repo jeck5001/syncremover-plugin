@@ -82,6 +82,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "audit_limit": 200,
 }
 
+DOWNLOAD_DIR_NAMES = {"download", "downloads", "incomplete", "tmp", "temp"}
+
 
 @dataclass
 class DeleteContext:
@@ -677,7 +679,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.11"
+    plugin_version = "0.1.12"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
@@ -995,8 +997,9 @@ class SyncRemover(_PluginBase):
         return result
 
     def _api_run_whitelist_once(self) -> Dict[str, Any]:
-        media_roots = self._coerce_paths(self._config.get("media_dirs"))
+        configured_media_roots = self._coerce_paths(self._config.get("media_dirs"))
         download_roots = self._coerce_paths(self._config.get("download_dirs"))
+        media_roots = configured_media_roots or (self._infer_media_roots_for_batch(download_roots) if download_roots else [])
         if not media_roots and not download_roots:
             logger.warning("同步删除助手：立即执行失败，未填写手动执行目标路径，且没有配置白名单")
             return {"ok": False, "reason": "manual_target_path or whitelist is required"}
@@ -1071,10 +1074,46 @@ class SyncRemover(_PluginBase):
                 task=task,
                 reason=match_reason,
             )
-            result = DeleteExecutor(self._config, self._audit_store).execute(context, match)
+            executor_config = dict(self._config)
+            executor_config["media_dirs"] = media_roots
+            result = DeleteExecutor(executor_config, self._audit_store).execute(context, match)
             self._log_result("白名单批量", result, target_path=media_path or full_path)
             return result
         return None
+
+    def _infer_media_roots_for_batch(self, download_roots: List[str]) -> List[str]:
+        inferred: List[str] = []
+        roots = self._coerce_paths(self._config.get("path_scan_roots"))
+        for root in roots:
+            root_path = Path(root)
+            if self._path_is_under_roots(root_path, download_roots) or root_path.name.lower() in DOWNLOAD_DIR_NAMES:
+                continue
+            if self._contains_download_root(root_path, download_roots):
+                inferred.extend(str(child) for child in self._iter_media_children(root_path, download_roots))
+            else:
+                inferred.append(str(root_path))
+        return list(dict.fromkeys(inferred))
+
+    def _contains_download_root(self, root: Path, download_roots: List[str]) -> bool:
+        for download_root in download_roots:
+            try:
+                Path(download_root).resolve().relative_to(root.resolve())
+                return True
+            except (OSError, ValueError):
+                continue
+        return False
+
+    def _iter_media_children(self, root: Path, download_roots: List[str]) -> Iterable[Path]:
+        try:
+            children = sorted(child for child in root.iterdir() if child.is_dir())
+        except OSError:
+            return []
+
+        return [
+            child
+            for child in children
+            if child.name.lower() not in DOWNLOAD_DIR_NAMES and not self._path_is_under_roots(child, download_roots)
+        ]
 
     def _find_named_media_path(self, task: Dict[str, Any], file_name: str, media_roots: List[str]) -> Optional[str]:
         source_names = [
@@ -1140,7 +1179,10 @@ class SyncRemover(_PluginBase):
         return None
 
     def _path_is_under_any(self, path: str, roots: List[str]) -> bool:
-        resolved = Path(path).resolve()
+        return self._path_is_under_roots(Path(path), roots)
+
+    def _path_is_under_roots(self, path: Path, roots: List[str]) -> bool:
+        resolved = path.resolve()
         for root in roots:
             try:
                 resolved.relative_to(Path(root).resolve())

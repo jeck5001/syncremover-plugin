@@ -19,6 +19,7 @@ https://raw.githubusercontent.com/jeck5001/syncremover-plugin/main/package.v2.js
 - 删除下载器任务时默认同时删除原始下载数据；如果下载器没有删干净，插件会在任务删除成功后补删仍存在的下载源文件。
 - 支持按下载源路径或媒体硬链接路径手动执行一次。
 - 手动目标路径留空时，会按媒体目录白名单和下载目录白名单批量执行。
+- 只配置下载白名单时，会从路径扫描根目录推导媒体库子目录，适配 `/vol2/1000/media` 下同时有 `download`、`cartoon`、`movie`、`tv` 等子目录的结构。
 - 支持演练模式，先看匹配和删除计划，不实际删除。
 - 支持媒体目录、下载目录白名单，避免误删白名单外路径。
 - 手动执行会把路径扫描根目录作为兜底安全根，避免已匹配任务后仍因未选择白名单被拦截。
@@ -44,6 +45,8 @@ https://raw.githubusercontent.com/jeck5001/syncremover-plugin/main/package.v2.js
 ```
 
 如果候选目录没有扫出来，就在手填目录里按“每行一个”输入 MoviePilot 容器内路径。
+
+如果你的宿主机大目录是 `/vol2/1000/media`，里面同时有 `download`、`incomplete`、`movie`、`tv`、`cartoon` 等子目录，可以把“路径扫描根目录”保留为 `/vol2/1000/media`，下载目录白名单填 `/vol2/1000/media/download`。媒体目录白名单可以显式填 `movie/tv/cartoon`，也可以留空让插件从大目录推导媒体库子目录；插件会排除 `download`、`downloads`、`incomplete`、`tmp` 这类下载目录。
 
 ## 手动执行一次
 

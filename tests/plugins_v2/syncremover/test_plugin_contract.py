@@ -489,6 +489,54 @@ def test_plugin_run_once_without_target_executes_media_hardlink_whitelist(tmp_pa
     assert not media_file.exists()
 
 
+def test_plugin_run_once_download_whitelist_scans_media_root_for_hardlinks(tmp_path):
+    module = load_plugin_module()
+    media_root = tmp_path / "media"
+    download_dir = media_root / "download" / "cartoon" / "Soul.Land"
+    library_dir = media_root / "cartoon" / "Soul.Land"
+    download_dir.mkdir(parents=True)
+    library_dir.mkdir(parents=True)
+    source_file = download_dir / "Soul.Land.S01E158.mp4"
+    media_file = library_dir / "Soul.Land.S01E158.mp4"
+    source_file.write_text("movie", encoding="utf-8")
+    os.link(source_file, media_file)
+
+    class Downloader:
+        def __init__(self):
+            self.deleted = []
+
+        def list_torrents(self):
+            return [{"hash": "abc", "save_path": str(download_dir)}]
+
+        def list_files(self, task_ref):
+            return [{"name": source_file.name}]
+
+        def delete_task(self, task_ref, delete_source_data):
+            self.deleted.append((task_ref, delete_source_data))
+            return True
+
+    downloader = Downloader()
+    plugin = module.SyncRemover()
+    plugin._downloaders = {"tr": downloader}
+    plugin.init_plugin(
+        {
+            "run_once": True,
+            "manual_target_path": "",
+            "download_dirs": [str(media_root / "download")],
+            "media_dirs": [],
+            "path_scan_roots": [str(media_root)],
+            "path_scan_roots_manual": "",
+        }
+    )
+    result = plugin._audit_store.list_records()[0]
+
+    assert downloader.deleted == [("abc", True)]
+    assert result["status"] == "success"
+    assert result["match_reason"] == "hardlink_path"
+    assert result["deleted_hardlinks"] == [str(media_file)]
+    assert not media_file.exists()
+
+
 def test_plugin_run_once_without_target_executes_media_name_whitelist(tmp_path):
     module = load_plugin_module()
     media_dir = tmp_path / "media" / "cartoon" / "Walking.The.Way.All.Alone.S01.2026.2160p.WEB-DL"
@@ -700,5 +748,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.11"
+    assert package["SyncRemover"]["version"] == "0.1.12"
     assert package["SyncRemover"]["level"] == 1
