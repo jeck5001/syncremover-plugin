@@ -41,6 +41,9 @@ def test_plugin_defaults_are_safe():
     assert defaults["download_dirs_manual"] == ""
     assert defaults["manual_target_path"] == ""
     assert defaults["run_once"] is False
+    assert defaults["repair_missed_hardlinks_paths_manual"] == ""
+    assert defaults["repair_missed_hardlinks_once"] is False
+    assert defaults["repair_missed_hardlinks_dry_run"] is True
 
 
 def test_plugin_exposes_audit_retry_dry_run_and_clear_api():
@@ -50,7 +53,15 @@ def test_plugin_exposes_audit_retry_dry_run_and_clear_api():
     apis = plugin.get_api()
     paths = {api["path"] for api in apis}
 
-    assert paths == {"/audit", "/retry", "/dry-run", "/clear-audit", "/scan-paths", "/run-once"}
+    assert paths == {
+        "/audit",
+        "/retry",
+        "/dry-run",
+        "/clear-audit",
+        "/scan-paths",
+        "/run-once",
+        "/repair-missed-hardlinks",
+    }
 
 
 def test_plugin_form_contains_safety_controls():
@@ -73,6 +84,9 @@ def test_plugin_form_contains_safety_controls():
     assert "VCol" in rendered
     assert "手动执行目标路径" in rendered
     assert "立即执行一次" in rendered
+    assert "补删遗漏硬链接路径" in rendered
+    assert "补删演练" in rendered
+    assert "立即补删" in rendered
     assert "失败仍清理硬链接" not in rendered
     assert defaults["delete_source_data"] is True
 
@@ -537,6 +551,85 @@ def test_plugin_run_once_download_whitelist_scans_media_root_for_hardlinks(tmp_p
     assert not media_file.exists()
 
 
+def test_plugin_repair_missed_hardlinks_deletes_unique_media_candidate_from_audit(tmp_path):
+    module = load_plugin_module()
+    media_root = tmp_path / "media"
+    download_root = media_root / "download"
+    library_dir = media_root / "cartoon" / "Soul.Land"
+    library_dir.mkdir(parents=True)
+    media_file = library_dir / "Soul.Land.S01E158.mp4"
+    media_file.write_text("movie", encoding="utf-8")
+    missing_download_path = str(download_root / "cartoon" / "Soul.Land" / media_file.name)
+
+    plugin = module.SyncRemover()
+    plugin.init_plugin(
+        {
+            "dry_run": False,
+            "download_dirs": [str(download_root)],
+            "media_dirs": [],
+            "path_scan_roots": [str(media_root)],
+            "path_scan_roots_manual": "",
+            "repair_missed_hardlinks_dry_run": False,
+        }
+    )
+    plugin._audit_store.add(
+        {
+            "status": "success",
+            "event_type": "manual.batch",
+            "downloader": "tr",
+            "task_ref": "abc",
+            "match_reason": "whitelist_path",
+            "reason": "downloader task deleted",
+            "media_paths": [],
+            "download_path": missing_download_path,
+            "deleted_hardlinks": [],
+        }
+    )
+
+    response = plugin.api_repair_missed_hardlinks()
+
+    assert response["ok"] is True
+    assert response["deleted"] == [str(media_file)]
+    assert response["results"][0]["status"] == "success"
+    assert media_file.exists() is False
+
+
+def test_plugin_repair_missed_hardlinks_skips_ambiguous_name_candidates(tmp_path):
+    module = load_plugin_module()
+    media_root = tmp_path / "media"
+    download_root = media_root / "download"
+    first_dir = media_root / "cartoon" / "A"
+    second_dir = media_root / "movie" / "B"
+    first_dir.mkdir(parents=True)
+    second_dir.mkdir(parents=True)
+    first_file = first_dir / "Same.Name.S01E01.mkv"
+    second_file = second_dir / "Same.Name.S01E01.mkv"
+    first_file.write_text("a", encoding="utf-8")
+    second_file.write_text("b", encoding="utf-8")
+
+    plugin = module.SyncRemover()
+    plugin.init_plugin(
+        {
+            "dry_run": False,
+            "download_dirs": [str(download_root)],
+            "media_dirs": [],
+            "path_scan_roots": [str(media_root)],
+            "path_scan_roots_manual": "",
+            "repair_missed_hardlinks_dry_run": False,
+        }
+    )
+
+    response = plugin.api_repair_missed_hardlinks(
+        {"paths": [str(download_root / "cartoon" / "Same.Name" / first_file.name)]}
+    )
+
+    assert response["ok"] is False
+    assert response["results"][0]["status"] == "skipped"
+    assert response["results"][0]["reason"] == "ambiguous_media_candidates"
+    assert first_file.exists()
+    assert second_file.exists()
+
+
 def test_plugin_run_once_without_target_executes_media_name_whitelist(tmp_path):
     module = load_plugin_module()
     media_dir = tmp_path / "media" / "cartoon" / "Walking.The.Way.All.Alone.S01.2026.2160p.WEB-DL"
@@ -748,5 +841,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.12"
+    assert package["SyncRemover"]["version"] == "0.1.13"
     assert package["SyncRemover"]["level"] == 1

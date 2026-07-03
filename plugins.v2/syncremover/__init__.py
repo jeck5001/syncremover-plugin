@@ -76,6 +76,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "path_scan_depth": 2,
     "manual_target_path": "",
     "run_once": False,
+    "repair_missed_hardlinks_paths_manual": "",
+    "repair_missed_hardlinks_once": False,
+    "repair_missed_hardlinks_dry_run": True,
     "strict_path_guard": True,
     "continue_hardlink_on_downloader_failure": False,
     "dry_run": False,
@@ -679,7 +682,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.12"
+    plugin_version = "0.1.13"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
@@ -720,6 +723,12 @@ class SyncRemover(_PluginBase):
             finally:
                 self._config["run_once"] = False
                 self._persist_config()
+        if merged.get("repair_missed_hardlinks_once"):
+            try:
+                self.api_repair_missed_hardlinks()
+            finally:
+                self._config["repair_missed_hardlinks_once"] = False
+                self._persist_config()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -734,6 +743,12 @@ class SyncRemover(_PluginBase):
             {"path": "/retry", "endpoint": self.api_retry, "methods": ["POST"], "summary": "重试审计记录"},
             {"path": "/dry-run", "endpoint": self.api_dry_run, "methods": ["POST"], "summary": "预演删除计划"},
             {"path": "/run-once", "endpoint": self.api_run_once, "methods": ["POST"], "summary": "立即执行一次"},
+            {
+                "path": "/repair-missed-hardlinks",
+                "endpoint": self.api_repair_missed_hardlinks,
+                "methods": ["POST"],
+                "summary": "补删遗漏硬链接",
+            },
             {"path": "/scan-paths", "endpoint": self.api_scan_paths, "methods": ["GET"], "summary": "扫描可选路径"},
             {"path": "/clear-audit", "endpoint": self.api_clear_audit, "methods": ["POST"], "summary": "清空审计记录"},
         ]
@@ -772,6 +787,49 @@ class SyncRemover(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {"model": "delete_source_data", "label": "删除原始下载数据"},
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 8},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "repair_missed_hardlinks_paths_manual",
+                                            "label": "补删遗漏硬链接路径（每行一个，可留空用最近审计记录）",
+                                            "rows": 2,
+                                            "autoGrow": True,
+                                            "clearable": True,
+                                            "density": "comfortable",
+                                            "hideDetails": "auto",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 2},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "repair_missed_hardlinks_dry_run", "label": "补删演练"},
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 2},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {"model": "repair_missed_hardlinks_once", "label": "立即补删"},
                                     }
                                 ],
                             },
@@ -996,6 +1054,106 @@ class SyncRemover(_PluginBase):
         self._log_result("立即执行", result, target_path=target_path)
         return result
 
+    def api_repair_missed_hardlinks(self, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        payload = payload or {}
+        paths = self._repair_missed_hardlink_paths(payload)
+        if not paths:
+            logger.warning("同步删除助手：补删遗漏硬链接失败，未找到可补删路径")
+            return {"ok": False, "reason": "repair path is required", "results": []}
+
+        download_roots = self._coerce_paths(self._config.get("download_dirs"))
+        media_roots = self._coerce_paths(self._config.get("media_dirs")) or self._infer_media_roots_for_batch(download_roots)
+        if not media_roots:
+            logger.warning("同步删除助手：补删遗漏硬链接失败，未配置或推导出媒体目录")
+            return {"ok": False, "reason": "media roots are required", "results": []}
+
+        dry_run = bool(payload.get("dry_run", self._config.get("repair_missed_hardlinks_dry_run", True)))
+        results = [self._repair_missed_hardlink_path(path, media_roots, dry_run) for path in paths]
+        deleted = [path for result in results for path in result.get("deleted", [])]
+        for result in results:
+            logger.info(
+                "同步删除助手：补删遗漏硬链接完成，状态：%s，原因：%s，候选：%s，删除：%s，路径：%s",
+                result.get("status"),
+                result.get("reason"),
+                len(result.get("candidates") or []),
+                len(result.get("deleted") or []),
+                result.get("download_path"),
+            )
+        return {"ok": bool(deleted) or any(result.get("status") == "dry_run" for result in results), "deleted": deleted, "results": results}
+
+    def _repair_missed_hardlink_paths(self, payload: Dict[str, Any]) -> List[str]:
+        paths = self._coerce_paths(payload.get("paths") or payload.get("download_paths"))
+        paths.extend(self._coerce_paths(self._config.get("repair_missed_hardlinks_paths_manual")))
+        if paths:
+            return list(dict.fromkeys(paths))
+
+        audit_paths: List[str] = []
+        for record in self._audit_store.list_records():
+            if record.get("status") != "success":
+                continue
+            if record.get("deleted_hardlinks"):
+                continue
+            download_path = record.get("download_path")
+            if download_path:
+                audit_paths.append(str(download_path))
+        return list(dict.fromkeys(audit_paths))
+
+    def _repair_missed_hardlink_path(self, download_path: str, media_roots: List[str], dry_run: bool) -> Dict[str, Any]:
+        candidates = self._repair_candidates_for_download_path(download_path, media_roots)
+        if not candidates:
+            return {"status": "skipped", "reason": "no_media_candidate", "download_path": download_path, "candidates": [], "deleted": []}
+        if len(candidates) > 1:
+            return {
+                "status": "skipped",
+                "reason": "ambiguous_media_candidates",
+                "download_path": download_path,
+                "candidates": candidates,
+                "deleted": [],
+            }
+        if dry_run:
+            return {"status": "dry_run", "reason": "dry run enabled", "download_path": download_path, "candidates": candidates, "deleted": []}
+
+        target = Path(candidates[0])
+        if not self._path_is_under_roots(target, media_roots):
+            return {
+                "status": "skipped",
+                "reason": "candidate outside media roots",
+                "download_path": download_path,
+                "candidates": candidates,
+                "deleted": [],
+            }
+        try:
+            if target.exists() and target.is_file():
+                target.unlink()
+                return {"status": "success", "reason": "deleted missed media candidate", "download_path": download_path, "candidates": candidates, "deleted": [str(target)]}
+        except OSError as err:
+            return {"status": "failed", "reason": str(err), "download_path": download_path, "candidates": candidates, "deleted": []}
+
+        return {"status": "skipped", "reason": "candidate missing", "download_path": download_path, "candidates": candidates, "deleted": []}
+
+    def _repair_candidates_for_download_path(self, download_path: str, media_roots: List[str]) -> List[str]:
+        source_path = Path(download_path)
+        if source_path.exists():
+            matches = self._find_hardlinked_media_paths(source_path, media_roots)
+            if matches:
+                return matches
+
+        file_name = source_path.name
+        candidates: List[str] = []
+        for root in media_roots:
+            root_path = Path(root)
+            try:
+                matches = root_path.rglob(file_name) if root_path.is_dir() else []
+            except OSError:
+                continue
+            for candidate in matches:
+                try:
+                    if candidate.is_file() and self._path_is_under_roots(candidate, media_roots):
+                        candidates.append(str(candidate))
+                except OSError:
+                    continue
+        return list(dict.fromkeys(candidates))
+
     def _api_run_whitelist_once(self) -> Dict[str, Any]:
         configured_media_roots = self._coerce_paths(self._config.get("media_dirs"))
         download_roots = self._coerce_paths(self._config.get("download_dirs"))
@@ -1150,10 +1308,15 @@ class SyncRemover(_PluginBase):
         return "".join(char.lower() for char in value if char.isalnum())
 
     def _find_hardlinked_media_path(self, source_path: Path, media_roots: List[str]) -> Optional[str]:
+        matches = self._find_hardlinked_media_paths(source_path, media_roots)
+        return matches[0] if matches else None
+
+    def _find_hardlinked_media_paths(self, source_path: Path, media_roots: List[str]) -> List[str]:
         try:
             source_stat = source_path.stat()
         except OSError:
-            return None
+            return []
+        matches: List[str] = []
         for root in media_roots:
             root_path = Path(root)
             try:
@@ -1175,8 +1338,8 @@ class SyncRemover(_PluginBase):
                     and source_stat.st_nlink > 1
                     and candidate_stat.st_nlink > 1
                 ):
-                    return str(candidate)
-        return None
+                    matches.append(str(candidate))
+        return list(dict.fromkeys(matches))
 
     def _path_is_under_any(self, path: str, roots: List[str]) -> bool:
         return self._path_is_under_roots(Path(path), roots)
