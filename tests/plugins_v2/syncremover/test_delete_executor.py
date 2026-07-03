@@ -28,7 +28,7 @@ def test_executor_dry_run_does_not_delete_task(tmp_path):
     assert audit.list_records()[0]["status"] == "dry_run"
 
 
-def test_executor_passes_delete_source_data_to_downloader(tmp_path):
+def test_executor_passes_default_delete_source_data_to_downloader(tmp_path):
     module = load_plugin_module()
     downloader = FakeDownloader()
     match = module.MatchResult("matched", "qbittorrent", downloader, "abc", {"hash": "abc"}, "hash")
@@ -41,7 +41,7 @@ def test_executor_passes_delete_source_data_to_downloader(tmp_path):
     result = executor.execute(module.DeleteContext("history.deleted", confidence="direct_task"), match)
 
     assert result["status"] == "success"
-    assert downloader.calls == [("abc", True)]
+    assert downloader.calls == [("abc", False)]
 
 
 def test_executor_rejects_missing_path_guard(tmp_path):

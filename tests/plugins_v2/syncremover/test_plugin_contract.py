@@ -28,7 +28,7 @@ def test_plugin_defaults_are_safe():
     form, defaults = plugin.get_form()
     assert form
     assert defaults["enabled"] is False
-    assert defaults["delete_source_data"] is True
+    assert defaults["delete_source_data"] is False
     assert defaults["hardlink_scope"] == "current_file"
     assert defaults["strict_path_guard"] is True
     assert defaults["continue_hardlink_on_downloader_failure"] is False
@@ -88,7 +88,7 @@ def test_plugin_form_contains_safety_controls():
     assert "补删演练" in rendered
     assert "立即补删" in rendered
     assert "失败仍清理硬链接" not in rendered
-    assert defaults["delete_source_data"] is True
+    assert defaults["delete_source_data"] is False
 
 
 def test_plugin_form_contains_scanned_path_options(tmp_path):
@@ -163,7 +163,7 @@ def test_plugin_run_once_executes_manual_target_path():
 
     assert result["status"] == "success"
     assert result["task_ref"] == "abc"
-    assert downloader.deleted == [("abc", True)]
+    assert downloader.deleted == [("abc", False)]
     assert plugin._config["run_once"] is False
 
 
@@ -199,8 +199,8 @@ def test_plugin_run_once_deletes_all_matching_downloaders():
     result = plugin._audit_store.list_records()[0]
 
     assert result["status"] == "success"
-    assert qb.deleted == [("qb_hash", True)]
-    assert tr.deleted == [("tr_hash", True)]
+    assert qb.deleted == [("qb_hash", False)]
+    assert tr.deleted == [("tr_hash", False)]
     assert result["downloader"] == "qb,tr"
 
 
@@ -245,7 +245,7 @@ def test_plugin_run_once_matches_manual_media_hardlink_path(tmp_path):
     assert result["status"] == "success"
     assert result["match_reason"] == "hardlink_path"
     assert result["download_path"] == str(source_file)
-    assert downloader.deleted == [("abc", True)]
+    assert downloader.deleted == [("abc", False)]
     assert not media_file.exists()
 
 
@@ -286,7 +286,7 @@ def test_plugin_run_once_allows_manual_path_under_scan_root(tmp_path):
     result = plugin._audit_store.list_records()[0]
 
     assert result["status"] == "success"
-    assert downloader.deleted == [("abc", True)]
+    assert downloader.deleted == [("abc", False)]
 
 
 def test_plugin_path_guard_failure_reports_allowed_roots():
@@ -456,7 +456,7 @@ def test_plugin_run_once_without_target_executes_download_whitelist(tmp_path):
         }
     )
 
-    assert downloader.deleted == [("allowed", True)]
+    assert downloader.deleted == [("allowed", False)]
     assert plugin._audit_store.list_records()[0]["status"] == "success"
 
 
@@ -498,7 +498,7 @@ def test_plugin_run_once_without_target_executes_media_hardlink_whitelist(tmp_pa
         }
     )
 
-    assert downloader.deleted == [("abc", True)]
+    assert downloader.deleted == [("abc", False)]
     assert plugin._audit_store.list_records()[0]["status"] == "success"
     assert not media_file.exists()
 
@@ -544,14 +544,14 @@ def test_plugin_run_once_download_whitelist_scans_media_root_for_hardlinks(tmp_p
     )
     result = plugin._audit_store.list_records()[0]
 
-    assert downloader.deleted == [("abc", True)]
+    assert downloader.deleted == [("abc", False)]
     assert result["status"] == "success"
     assert result["match_reason"] == "hardlink_path"
     assert result["deleted_hardlinks"] == [str(media_file)]
     assert not media_file.exists()
 
 
-def test_plugin_repair_missed_hardlinks_deletes_unique_media_candidate_from_audit(tmp_path):
+def test_plugin_repair_missed_hardlinks_never_deletes_media_candidate(tmp_path):
     module = load_plugin_module()
     media_root = tmp_path / "media"
     download_root = media_root / "download"
@@ -588,10 +588,12 @@ def test_plugin_repair_missed_hardlinks_deletes_unique_media_candidate_from_audi
 
     response = plugin.api_repair_missed_hardlinks()
 
-    assert response["ok"] is True
-    assert response["deleted"] == [str(media_file)]
-    assert response["results"][0]["status"] == "success"
-    assert media_file.exists() is False
+    assert response["ok"] is False
+    assert response["deleted"] == []
+    assert response["results"][0]["status"] == "blocked"
+    assert response["results"][0]["reason"] == "repair delete disabled for safety"
+    assert response["results"][0]["candidates"] == [str(media_file)]
+    assert media_file.exists()
 
 
 def test_plugin_repair_missed_hardlinks_skips_ambiguous_name_candidates(tmp_path):
@@ -671,7 +673,7 @@ def test_plugin_run_once_without_target_executes_media_name_whitelist(tmp_path):
     )
     result = plugin._audit_store.list_records()[0]
 
-    assert downloader.deleted == [("abc", True)]
+    assert downloader.deleted == [("abc", False)]
     assert result["status"] == "success"
     assert result["match_reason"] == "media_name"
     assert media_file.exists()
@@ -791,8 +793,8 @@ def test_plugin_enabled_event_deletes_all_matching_downloaders():
 
     assert response["status"] == "success"
     assert response["downloader"] == "qb,tr"
-    assert qb.deleted == [("qb_hash", True)]
-    assert tr.deleted == [("tr_hash", True)]
+    assert qb.deleted == [("qb_hash", False)]
+    assert tr.deleted == [("tr_hash", False)]
 
 
 def test_plugin_retry_replays_matched_audit_record():
@@ -825,7 +827,7 @@ def test_plugin_retry_replays_matched_audit_record():
     response = plugin.api_retry(record["id"])
 
     assert response["status"] == "success"
-    assert downloader.deleted == [("abc", True)]
+    assert downloader.deleted == [("abc", False)]
 
 
 def test_plugin_handles_disabled_event_as_noop():
@@ -841,5 +843,5 @@ def test_package_v2_contains_syncremover_metadata():
     package = json.loads(package_file.read_text(encoding="utf-8"))
 
     assert package["SyncRemover"]["name"] == "同步删除助手"
-    assert package["SyncRemover"]["version"] == "0.1.13"
+    assert package["SyncRemover"]["version"] == "0.1.14"
     assert package["SyncRemover"]["level"] == 1

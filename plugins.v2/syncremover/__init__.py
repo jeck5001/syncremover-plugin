@@ -64,7 +64,7 @@ except Exception:
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
-    "delete_source_data": True,
+    "delete_source_data": False,
     "hardlink_scope": "current_file",
     "enabled_downloaders": ["qbittorrent", "transmission"],
     "media_dirs": [],
@@ -682,7 +682,7 @@ class SyncRemover(_PluginBase):
     plugin_name = "同步删除助手"
     plugin_desc = "同步删除 qBittorrent、Transmission 和硬链接媒体文件"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "0.1.13"
+    plugin_version = "0.1.14"
     plugin_author = "jfwang"
     plugin_config_prefix = "syncremover_"
     plugin_order = 50
@@ -1113,23 +1113,13 @@ class SyncRemover(_PluginBase):
         if dry_run:
             return {"status": "dry_run", "reason": "dry run enabled", "download_path": download_path, "candidates": candidates, "deleted": []}
 
-        target = Path(candidates[0])
-        if not self._path_is_under_roots(target, media_roots):
-            return {
-                "status": "skipped",
-                "reason": "candidate outside media roots",
-                "download_path": download_path,
-                "candidates": candidates,
-                "deleted": [],
-            }
-        try:
-            if target.exists() and target.is_file():
-                target.unlink()
-                return {"status": "success", "reason": "deleted missed media candidate", "download_path": download_path, "candidates": candidates, "deleted": [str(target)]}
-        except OSError as err:
-            return {"status": "failed", "reason": str(err), "download_path": download_path, "candidates": candidates, "deleted": []}
-
-        return {"status": "skipped", "reason": "candidate missing", "download_path": download_path, "candidates": candidates, "deleted": []}
+        return {
+            "status": "blocked",
+            "reason": "repair delete disabled for safety",
+            "download_path": download_path,
+            "candidates": candidates,
+            "deleted": [],
+        }
 
     def _repair_candidates_for_download_path(self, download_path: str, media_roots: List[str]) -> List[str]:
         source_path = Path(download_path)
